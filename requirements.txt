@@ -4,4 +4,6 @@ supabase==2.6.0
 python-dotenv==1.0.1
 supafunc==0.5.1
 bcrypt==4.1.2
+requests==2.32.3
+python-multipart==0.0.12
 

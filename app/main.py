@@ -1,10 +1,11 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional
 import uuid
 import os
 import requests
 import bcrypt
+import base64
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from .supabase_client import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
@@ -138,6 +139,26 @@ def signin(payload: SignInRequest):
         raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error signing in: {str(e)}")
+
+
+@app.get("/users")
+def list_users():
+    """
+    Return system users for UI dropdowns (id + username only).
+    """
+    try:
+        resp = requests.get(
+            f"{REST_URL}/users",
+            headers=SERVICE_HEADERS,
+            params={"select": "id,username", "order": "username.asc"},
+        )
+        resp.raise_for_status()
+        return resp.json() or []
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching users: {str(e)}")
 
 @app.get("/orders")
 def orders():
@@ -367,23 +388,102 @@ def maintenance_tasks():
         raise HTTPException(status_code=500, detail=f"Error fetching maintenance tasks: {str(e)}")
 
 @app.post("/maintenance/tasks")
-def create_maintenance_task(payload: dict):
-    data = payload
-    if not data.get("id"):
-        data["id"] = str(uuid.uuid4())
+async def create_maintenance_task(request: Request):
+    """
+    Create a maintenance task.
+
+    Supports both:
+    - application/json (legacy)
+    - multipart/form-data with optional file field `media`
+
+    Notes:
+    - Category/Priority are deprecated in the UI. If the DB still requires `priority`,
+      we set a default server-side to keep inserts working.
+    - Media is stored in DB in `image_uri` as a data-URI: data:<mime>;base64,<...>
+      (works for both images and videos).
+    """
+    content_type = (request.headers.get("content-type") or "").lower()
+
+    data: dict = {}
+    media_data_uri: Optional[str] = None
+
     try:
+        if content_type.startswith("application/json"):
+            payload = await request.json()
+            if isinstance(payload, dict):
+                data = payload
+        else:
+            form = await request.form()
+            data = {k: v for k, v in form.items() if k != "media"}
+            media = form.get("media")
+            if media is not None and hasattr(media, "filename"):
+                # Starlette UploadFile-like
+                filename = getattr(media, "filename", None) or "upload.bin"
+                content_type = getattr(media, "content_type", None) or "application/octet-stream"
+                raw = await media.read()
+                b64 = base64.b64encode(raw).decode("ascii")
+                media_data_uri = f"data:{content_type};base64,{b64}"
+                data["image_uri"] = media_data_uri
+
+        if not data.get("id"):
+            data["id"] = str(uuid.uuid4())
+
+        # Normalize keys for Supabase schema
+        # unit_id is required by DB
+        if "unitId" in data and "unit_id" not in data:
+            data["unit_id"] = data["unitId"]
+
+        # Remove deprecated fields from client payload (UI no longer sends these)
+        data.pop("category", None)
+        data.pop("priority", None)
+
+        # Keep DB compatibility if priority is NOT NULL (default it)
+        if "priority" not in data:
+            data["priority"] = "בינוני"
+        # Keep DB compatibility for created_date if missing
+        if "created_date" not in data and "createdDate" in data:
+            data["created_date"] = data["createdDate"]
+
         resp = requests.post(f"{REST_URL}/maintenance_tasks", headers=SERVICE_HEADERS, json=data)
         resp.raise_for_status()
         if resp.text:
             body = resp.json()
             return body[0] if isinstance(body, list) and body else body
         return data
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:400]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating maintenance task: {str(e)}")
+
+
+@app.get("/maintenance/tasks/{task_id}")
+def get_maintenance_task(task_id: str):
+    try:
+        resp = requests.get(
+            f"{REST_URL}/maintenance_tasks",
+            headers=SERVICE_HEADERS,
+            params={"id": f"eq.{task_id}", "select": "*"},
+        )
+        resp.raise_for_status()
+        rows = resp.json() or []
+        if not rows:
+            raise HTTPException(status_code=404, detail="Task not found")
+        return rows[0]
+    except HTTPException:
+        raise
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching maintenance task: {str(e)}")
 
 @app.patch("/maintenance/tasks/{task_id}")
 def update_maintenance_task(task_id: str, payload: dict):
     data = {k: v for k, v in payload.items() if v is not None}
+    # Deprecated fields - ignore if sent
+    data.pop("category", None)
+    data.pop("priority", None)
     if not data:
         return {"message": "No changes provided"}
     try:
