@@ -1,19 +1,18 @@
-"""
-Vercel serverless function handler for FastAPI app.
-This file wraps the FastAPI app with Mangum for AWS Lambda/API Gateway compatibility.
-"""
 import sys
 import os
 
-# Add parent directory to Python path
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)
+# Add parent directory to path
+parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent not in sys.path:
+    sys.path.insert(0, parent)
 
 from mangum import Mangum
 from app.main import app
 
-# Create Mangum handler instance for Vercel
-handler = Mangum(app, lifespan="off")
+# Export handler as a callable function
+# Vercel expects handler(event, context) signature
+mangum_app = Mangum(app, lifespan="off")
+
+def handler(event, context):
+    return mangum_app(event, context)
 
