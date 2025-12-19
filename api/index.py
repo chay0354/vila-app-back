@@ -10,18 +10,11 @@ parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-try:
-    from mangum import Mangum
-    from app.main import app
-    
-    # Create ASGI handler for Vercel
-    # Mangum converts ASGI app to AWS Lambda/API Gateway format that Vercel uses
-    handler = Mangum(app, lifespan="off")
-except Exception as e:
-    # Fallback for debugging
-    def handler(event, context):
-        return {
-            "statusCode": 500,
-            "body": f"Error initializing app: {str(e)}"
-        }
+from mangum import Mangum
+from app.main import app
+
+# Create ASGI handler for Vercel
+# Mangum converts ASGI app to AWS Lambda/API Gateway format that Vercel uses
+# The handler variable name is what Vercel looks for
+handler = Mangum(app, lifespan="off")
 
