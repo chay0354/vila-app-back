@@ -6,14 +6,22 @@ import sys
 import os
 
 # Add the parent directory to the path so we can import app
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
 
-from mangum import Mangum
-from app.main import app
-
-# Create ASGI handler for Vercel
-handler = Mangum(app, lifespan="off")
-
-# Export handler for Vercel
-__all__ = ["handler"]
+try:
+    from mangum import Mangum
+    from app.main import app
+    
+    # Create ASGI handler for Vercel
+    # Mangum converts ASGI app to AWS Lambda/API Gateway format that Vercel uses
+    handler = Mangum(app, lifespan="off")
+except Exception as e:
+    # Fallback for debugging
+    def handler(event, context):
+        return {
+            "statusCode": 500,
+            "body": f"Error initializing app: {str(e)}"
+        }
 
