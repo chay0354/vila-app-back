@@ -140,6 +140,17 @@ def signin(payload: SignInRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error signing in: {str(e)}")
 
+# Add /api/ prefix endpoints for frontend compatibility
+@app.post("/api/auth/login")
+def api_login(payload: SignInRequest):
+    """Alias for /auth/signin to match frontend expectations"""
+    return signin(payload)
+
+@app.post("/api/auth/signup")
+def api_signup(payload: SignUpRequest):
+    """Alias for /auth/signup to match frontend expectations"""
+    return signup(payload)
+
 
 @app.get("/users")
 def list_users():
@@ -160,6 +171,11 @@ def list_users():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching users: {str(e)}")
 
+@app.get("/api/users")
+def api_list_users():
+    """Alias for /users to match frontend expectations"""
+    return list_users()
+
 @app.get("/orders")
 def orders():
     try:
@@ -168,6 +184,11 @@ def orders():
         return resp.json()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/orders")
+def api_orders():
+    """Alias for /orders to match frontend expectations"""
+    return orders()
 
 
 class OrderUpdate(BaseModel):
@@ -200,6 +221,11 @@ def update_order(order_id: str, payload: OrderUpdate):
         return resp.json()
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.patch("/api/orders/{order_id}")
+def api_update_order(order_id: str, payload: OrderUpdate):
+    """Alias for /orders/{order_id} to match frontend expectations"""
+    return update_order(order_id, payload)
 
 
 class OrderCreate(BaseModel):
@@ -243,6 +269,33 @@ def create_order(payload: OrderCreate):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating order: {str(e)}")
 
+@app.post("/api/orders")
+def api_create_order(payload: dict):
+    """Create order with frontend camelCase format"""
+    # Map frontend camelCase to backend snake_case
+    order_data = {
+        "guest_name": payload.get("guestName", ""),
+        "unit_number": payload.get("unitNumber", ""),
+        "arrival_date": payload.get("arrivalDate", ""),
+        "departure_date": payload.get("departureDate", ""),
+        "status": payload.get("status", "חדש"),
+        "guests_count": payload.get("guestsCount", 0),
+        "special_requests": payload.get("specialRequests") or "",
+        "internal_notes": payload.get("internalNotes") or "",
+        "paid_amount": payload.get("paidAmount", 0),
+        "total_amount": payload.get("totalAmount", 0),
+        "payment_method": payload.get("paymentMethod", "טרם נקבע"),
+    }
+    
+    # Create OrderCreate model from mapped data
+    order_create = OrderCreate(**order_data)
+    result = create_order(order_create)
+    
+    # Return as single object, not array
+    if isinstance(result, list):
+        return result[0] if result else {}
+    return result
+
 
 @app.delete("/orders/{order_id}")
 def delete_order(order_id: str):
@@ -274,6 +327,11 @@ def inventory_items():
         return resp.json()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching inventory items: {str(e)}")
+
+@app.get("/api/inventory/items")
+def api_inventory_items():
+    """Alias for /inventory/items to match frontend expectations"""
+    return inventory_items()
 
 @app.post("/inventory/items")
 def create_inventory_item(payload: dict):
@@ -335,11 +393,17 @@ def inventory_orders():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching inventory orders: {str(e)}")
 
+@app.get("/api/inventory/orders")
+def api_inventory_orders():
+    """Alias for /inventory/orders to match frontend expectations"""
+    return inventory_orders()
+
 @app.post("/inventory/orders")
 def create_inventory_order(payload: dict):
-    data = payload
+    data = payload.copy()
     if not data.get("id"):
-        data["id"] = str(uuid.uuid4())
+        import time
+        data["id"] = f"ORD-INV-{int(time.time() * 1000)}"
     try:
         resp = requests.post(f"{REST_URL}/inventory_orders", headers=SERVICE_HEADERS, json=data)
         resp.raise_for_status()
@@ -347,8 +411,37 @@ def create_inventory_order(payload: dict):
             body = resp.json()
             return body[0] if isinstance(body, list) and body else body
         return data
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:400]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating inventory order: {str(e)}")
+
+@app.post("/api/inventory/orders")
+def api_create_inventory_order(payload: dict):
+    """Create inventory order with frontend camelCase format"""
+    import time
+    # Map frontend camelCase to backend snake_case
+    order_data = {
+        "id": payload.get("id") or f"ORD-INV-{int(time.time() * 1000)}",
+        "item_id": payload.get("itemId") or payload.get("item_id") or "",
+        "item_name": payload.get("itemName") or payload.get("item_name", ""),
+        "quantity": int(payload.get("quantity", 0)),
+        "unit": payload.get("unit", ""),
+        "order_date": payload.get("orderDate") or payload.get("order_date", ""),
+        "status": payload.get("status", "ממתין לאישור"),
+        "order_type": payload.get("orderType") or payload.get("order_type", "הזמנה כללית"),
+    }
+    
+    # Optional fields - only add if provided
+    if payload.get("deliveryDate") or payload.get("delivery_date"):
+        order_data["delivery_date"] = payload.get("deliveryDate") or payload.get("delivery_date")
+    if payload.get("orderedBy") or payload.get("ordered_by"):
+        order_data["ordered_by"] = payload.get("orderedBy") or payload.get("ordered_by")
+    if payload.get("unitNumber") or payload.get("unit_number"):
+        order_data["unit_number"] = payload.get("unitNumber") or payload.get("unit_number")
+    
+    return create_inventory_order(order_data)
 
 @app.patch("/inventory/orders/{order_id}")
 def update_inventory_order(order_id: str, payload: dict):
@@ -387,6 +480,16 @@ def maintenance_tasks():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching maintenance tasks: {str(e)}")
 
+@app.get("/api/maintenance/tasks")
+def api_maintenance_tasks():
+    """Alias for /maintenance/tasks to match frontend expectations"""
+    return maintenance_tasks()
+
+@app.post("/api/maintenance/tasks")
+async def api_create_maintenance_task(request: Request):
+    """Alias for /maintenance/tasks to match frontend expectations"""
+    return await create_maintenance_task(request)
+
 @app.post("/maintenance/tasks")
 async def create_maintenance_task(request: Request):
     """
@@ -412,6 +515,9 @@ async def create_maintenance_task(request: Request):
             payload = await request.json()
             if isinstance(payload, dict):
                 data = payload
+                # If imageUri is provided in JSON payload, use it directly
+                if "imageUri" in data:
+                    data["image_uri"] = data.pop("imageUri")
         else:
             form = await request.form()
             data = {k: v for k, v in form.items() if k != "media"}
@@ -428,10 +534,15 @@ async def create_maintenance_task(request: Request):
         if not data.get("id"):
             data["id"] = str(uuid.uuid4())
 
-        # Normalize keys for Supabase schema
-        # unit_id is required by DB
-        if "unitId" in data and "unit_id" not in data:
-            data["unit_id"] = data["unitId"]
+        # Normalize keys for Supabase schema - map camelCase to snake_case
+        if "unitId" in data:
+            data["unit_id"] = data.pop("unitId")
+        if "createdDate" in data:
+            data["created_date"] = data.pop("createdDate")
+        if "assignedTo" in data:
+            assigned_value = data.pop("assignedTo")
+            if assigned_value:  # Only add if not empty
+                data["assigned_to"] = assigned_value
 
         # Remove deprecated fields from client payload (UI no longer sends these)
         data.pop("category", None)
@@ -440,9 +551,17 @@ async def create_maintenance_task(request: Request):
         # Keep DB compatibility if priority is NOT NULL (default it)
         if "priority" not in data:
             data["priority"] = "בינוני"
-        # Keep DB compatibility for created_date if missing
-        if "created_date" not in data and "createdDate" in data:
-            data["created_date"] = data["createdDate"]
+        
+        # Ensure required fields have defaults
+        if "unit_id" not in data or not data["unit_id"]:
+            raise HTTPException(status_code=400, detail="unit_id is required")
+        if "title" not in data or not data["title"]:
+            raise HTTPException(status_code=400, detail="title is required")
+        if "status" not in data:
+            data["status"] = "פתוח"
+        if "created_date" not in data:
+            from datetime import datetime
+            data["created_date"] = datetime.now().strftime("%Y-%m-%d")
 
         resp = requests.post(f"{REST_URL}/maintenance_tasks", headers=SERVICE_HEADERS, json=data)
         resp.raise_for_status()
@@ -504,6 +623,11 @@ def update_maintenance_task(task_id: str, payload: dict):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error updating maintenance task: {str(e)}")
 
+@app.patch("/api/maintenance/tasks/{task_id}")
+def api_update_maintenance_task(task_id: str, payload: dict):
+    """Alias for /maintenance/tasks/{task_id} to match frontend expectations"""
+    return update_maintenance_task(task_id, payload)
+
 @app.delete("/maintenance/tasks/{task_id}")
 def delete_maintenance_task(task_id: str):
     try:
@@ -534,6 +658,11 @@ def reports_summary():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching reports summary: {str(e)}")
 
+@app.get("/api/reports/summary")
+def api_reports_summary():
+    """Alias for /reports/summary to match frontend expectations"""
+    return reports_summary()
+
 @app.get("/invoices")
 def invoices():
     try:
@@ -552,6 +681,48 @@ def chat_messages():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching chat messages: {str(e)}")
 
+@app.get("/api/chat/messages")
+def api_chat_messages():
+    """Alias for /chat/messages to match frontend expectations"""
+    return chat_messages()
+
+@app.post("/api/chat/messages")
+def api_send_chat_message(payload: dict):
+    """Send a chat message"""
+    try:
+        # Don't send id - let Supabase auto-generate it (bigint identity)
+        # Don't send created_at - let Supabase use default now()
+        data = {
+            "sender": payload.get("sender", ""),
+            "content": payload.get("content", ""),
+        }
+        
+        if not data["sender"] or not data["content"]:
+            raise HTTPException(status_code=400, detail="sender and content are required")
+        
+        resp = requests.post(f"{REST_URL}/chat_messages", headers=SERVICE_HEADERS, json=data)
+        resp.raise_for_status()
+        if resp.text:
+            body = resp.json()
+            result = body[0] if isinstance(body, list) and body else body
+            
+            # TODO: Send push notifications to all users except sender
+            # This would require:
+            # 1. User device tokens stored in database
+            # 2. FCM/APNS setup
+            # 3. Notification service integration
+            # For now, frontend will handle local notifications
+            
+            return result
+        return data
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:400]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error sending chat message: {str(e)}")
+
 @app.get("/attendance/logs")
 def attendance_logs():
     try:
@@ -560,4 +731,103 @@ def attendance_logs():
         return resp.json()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching attendance logs: {str(e)}")
+
+@app.get("/api/attendance/logs")
+def api_attendance_logs():
+    """Alias for /attendance/logs to match frontend expectations"""
+    return attendance_logs()
+
+# Warehouse endpoints
+@app.get("/api/warehouses")
+def api_get_warehouses():
+    """Get all warehouses"""
+    try:
+        resp = requests.get(f"{REST_URL}/warehouses", headers=SERVICE_HEADERS, params={"select": "*"})
+        resp.raise_for_status()
+        return resp.json() or []
+    except requests.exceptions.HTTPError as e:
+        # If table doesn't exist, return empty array
+        if e.response and e.response.status_code == 404:
+            return []
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching warehouses: {str(e)}")
+
+@app.post("/api/warehouses")
+def api_create_warehouse(payload: dict):
+    """Create a warehouse"""
+    try:
+        data = payload
+        if not data.get("id"):
+            data["id"] = str(uuid.uuid4())
+        resp = requests.post(f"{REST_URL}/warehouses", headers=SERVICE_HEADERS, json=data)
+        resp.raise_for_status()
+        if resp.text:
+            body = resp.json()
+            return body[0] if isinstance(body, list) and body else body
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating warehouse: {str(e)}")
+
+@app.get("/api/warehouses/{warehouse_id}/items")
+def api_get_warehouse_items(warehouse_id: str):
+    """Get items for a warehouse"""
+    try:
+        resp = requests.get(
+            f"{REST_URL}/warehouse_items",
+            headers=SERVICE_HEADERS,
+            params={"warehouse_id": f"eq.{warehouse_id}", "select": "*"}
+        )
+        resp.raise_for_status()
+        return resp.json() or []
+    except requests.exceptions.HTTPError as e:
+        # If table doesn't exist, return empty array
+        if e.response and e.response.status_code == 404:
+            return []
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching warehouse items: {str(e)}")
+
+@app.post("/api/warehouses/{warehouse_id}/items")
+def api_create_warehouse_item(warehouse_id: str, payload: dict):
+    """Create a warehouse item"""
+    try:
+        data = payload
+        data["warehouse_id"] = warehouse_id
+        if not data.get("id"):
+            data["id"] = str(uuid.uuid4())
+        resp = requests.post(f"{REST_URL}/warehouse_items", headers=SERVICE_HEADERS, json=data)
+        resp.raise_for_status()
+        if resp.text:
+            body = resp.json()
+            return body[0] if isinstance(body, list) and body else body
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating warehouse item: {str(e)}")
+
+@app.patch("/api/warehouses/{warehouse_id}/items/{item_id}")
+def api_update_warehouse_item(warehouse_id: str, item_id: str, payload: dict):
+    """Update a warehouse item"""
+    try:
+        data = {k: v for k, v in payload.items() if v is not None}
+        if not data:
+            return {"message": "No changes provided"}
+        headers = {**SERVICE_HEADERS, "Prefer": "return=representation"}
+        resp = requests.patch(
+            f"{REST_URL}/warehouse_items?id=eq.{item_id}",
+            headers=headers,
+            json=data
+        )
+        resp.raise_for_status()
+        if resp.text:
+            result = resp.json()
+            return result[0] if isinstance(result, list) and result else result
+        return {"id": item_id, "message": "Updated successfully"}
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating warehouse item: {str(e)}")
 
