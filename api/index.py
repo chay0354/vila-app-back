@@ -9,10 +9,6 @@ if parent not in sys.path:
 from mangum import Mangum
 from app.main import app
 
-# Export handler as a callable function
-# Vercel expects handler(event, context) signature
-mangum_app = Mangum(app, lifespan="off")
-
-def handler(event, context):
-    return mangum_app(event, context)
+# Export handler directly - Vercel expects this variable name
+handler = Mangum(app)
 
