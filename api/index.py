@@ -13,11 +13,11 @@ if parent_dir not in sys.path:
 from mangum import Mangum
 from app.main import app
 
-# Create ASGI handler for Vercel
+# Create ASGI handler for Vercel at module level
 # Mangum converts ASGI app to AWS Lambda/API Gateway format that Vercel uses
-# Export as a callable handler function
-def handler(event, context):
-    """Vercel serverless function handler"""
-    asgi_handler = Mangum(app, lifespan="off")
-    return asgi_handler(event, context)
+# Vercel looks for a 'handler' variable or function
+mangum_handler = Mangum(app, lifespan="off")
+
+# Export handler - Vercel expects this to be callable
+handler = mangum_handler
 
