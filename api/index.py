@@ -1,22 +1,15 @@
-"""
-Vercel serverless function wrapper for FastAPI app.
-Uses Mangum to convert ASGI app to Lambda/API Gateway format.
-"""
 import sys
 import os
 
-# Add parent directory to path
-parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, parent)
+# Add parent directory to Python path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
 
 from mangum import Mangum
 from app.main import app
 
-# Initialize Mangum handler - this converts FastAPI (ASGI) to Lambda format
-_app_handler = Mangum(app, lifespan="off")
-
-# Vercel expects a 'handler' function that takes (event, context)
-def handler(event, context=None):
-    """Vercel serverless function handler"""
-    return _app_handler(event, context or {})
+# Create Mangum handler instance
+handler = Mangum(app, lifespan="off")
 
