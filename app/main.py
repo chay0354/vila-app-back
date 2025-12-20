@@ -29,6 +29,10 @@ SERVICE_HEADERS = {
     "Prefer": "return=representation",  # Return inserted row
 }
 
+@app.get("/")
+def root():
+    return {"message": "bolavila-backend API", "status": "running", "docs": "/docs"}
+
 @app.get("/health")
 def health():
     return {"ok": True}
