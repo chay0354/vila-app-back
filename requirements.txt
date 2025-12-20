@@ -6,5 +6,5 @@ supafunc==0.5.1
 bcrypt==4.1.2
 requests==2.32.3
 python-multipart==0.0.12
-typing-extensions==4.5.0
+typing-extensions>=4.8.0
 
