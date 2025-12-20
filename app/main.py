@@ -420,7 +420,17 @@ def create_inventory_order(payload: dict):
             return body[0] if isinstance(body, list) and body else body
         return data
     except requests.exceptions.HTTPError as e:
-        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:400]}" if e.response else str(e)
+        # Get full error response for debugging
+        error_text = ""
+        if e.response:
+            try:
+                error_text = e.response.text
+            except:
+                error_text = str(e.response)
+        error_detail = f"HTTP {e.response.status_code}: {error_text[:500]}" if e.response else str(e)
+        # Log the data being sent for debugging
+        print(f"Error creating inventory order. Data sent: {data}")
+        print(f"Full error: {error_detail}")
         raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating inventory order: {str(e)}")
@@ -448,6 +458,10 @@ def api_create_inventory_order(payload: dict):
         order_data["ordered_by"] = payload.get("orderedBy") or payload.get("ordered_by")
     if payload.get("unitNumber") or payload.get("unit_number"):
         order_data["unit_number"] = payload.get("unitNumber") or payload.get("unit_number")
+    
+    # Log the data being sent for debugging
+    print(f"Creating inventory order with ID: {order_data['id']}")
+    print(f"Order data: {order_data}")
     
     return create_inventory_order(order_data)
 
