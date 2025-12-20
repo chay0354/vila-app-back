@@ -444,6 +444,7 @@ def api_create_inventory_order(payload: dict):
     
     # If item_id is provided but empty, set to None to avoid foreign key constraint issues
     # Supabase allows NULL for foreign keys if the column is nullable
+    # Generate UUID for id - ensure uniqueness
     order_data = {
         "id": str(uuid.uuid4()),
         "item_id": item_id if item_id else None,  # Set to None if empty to avoid FK constraint
