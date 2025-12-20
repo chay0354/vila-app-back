@@ -411,8 +411,7 @@ def api_inventory_orders():
 def create_inventory_order(payload: dict):
     data = payload.copy()
     if not data.get("id"):
-        import time
-        data["id"] = f"ORD-INV-{int(time.time() * 1000)}"
+        data["id"] = str(uuid.uuid4())
     try:
         resp = requests.post(f"{REST_URL}/inventory_orders", headers=SERVICE_HEADERS, json=data)
         resp.raise_for_status()
@@ -429,10 +428,9 @@ def create_inventory_order(payload: dict):
 @app.post("/api/inventory/orders")
 def api_create_inventory_order(payload: dict):
     """Create inventory order with frontend camelCase format"""
-    import time
     # Map frontend camelCase to backend snake_case
     order_data = {
-        "id": payload.get("id") or f"ORD-INV-{int(time.time() * 1000)}",
+        "id": payload.get("id") or str(uuid.uuid4()),
         "item_id": payload.get("itemId") or payload.get("item_id") or "",
         "item_name": payload.get("itemName") or payload.get("item_name", ""),
         "quantity": int(payload.get("quantity", 0)),
