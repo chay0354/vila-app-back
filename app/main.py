@@ -698,6 +698,166 @@ def invoices():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching invoices: {str(e)}")
 
+@app.post("/api/invoices/process")
+async def process_invoice(request: Request):
+    """
+    Process an invoice image using OpenAI Vision API to extract:
+    - Total price
+    - Price per item (list of items with prices)
+    """
+    import os
+    from openai import OpenAI
+    
+    # Get OpenAI API key from environment
+    openai_key = os.getenv("OPEN_AI_KEY") or os.getenv("OPENAI_API_KEY")
+    if not openai_key:
+        raise HTTPException(status_code=500, detail="OpenAI API key not configured")
+    
+    content_type = (request.headers.get("content-type") or "").lower()
+    
+    try:
+        if content_type.startswith("multipart/form-data"):
+            form = await request.form()
+            image_file = form.get("image")
+            if not image_file:
+                raise HTTPException(status_code=400, detail="Image file is required")
+            
+            # Read image file
+            image_data = await image_file.read()
+            image_base64 = base64.b64encode(image_data).decode("utf-8")
+            image_mime = getattr(image_file, "content_type", "image/jpeg")
+        elif content_type.startswith("application/json"):
+            payload = await request.json()
+            # Expect base64 encoded image in data URI format: data:image/jpeg;base64,...
+            image_data_uri = payload.get("image")
+            if not image_data_uri:
+                raise HTTPException(status_code=400, detail="Image data is required")
+            
+            # Extract base64 from data URI
+            if image_data_uri.startswith("data:"):
+                parts = image_data_uri.split(",", 1)
+                image_base64 = parts[1] if len(parts) > 1 else image_data_uri
+                mime_part = parts[0].split(";")[0] if len(parts) > 0 else "data:image/jpeg"
+                image_mime = mime_part.replace("data:", "") if mime_part.startswith("data:") else "image/jpeg"
+            else:
+                image_base64 = image_data_uri
+                image_mime = "image/jpeg"
+        else:
+            raise HTTPException(status_code=400, detail="Content-Type must be multipart/form-data or application/json")
+        
+        # Initialize OpenAI client
+        client = OpenAI(api_key=openai_key)
+        
+        # Call OpenAI Vision API
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """You are an expert at extracting invoice data from images. 
+                    Analyze the invoice image and extract:
+                    1. Total price (the final amount to pay)
+                    2. A list of items with their individual prices
+                    
+                    Return the data in JSON format with this structure:
+                    {
+                        "total_price": <number>,
+                        "currency": "<currency code like ILS, USD, EUR>",
+                        "items": [
+                            {
+                                "name": "<item name>",
+                                "quantity": <number>,
+                                "unit_price": <number>,
+                                "total_price": <number>
+                            }
+                        ],
+                        "vendor": "<vendor/supplier name if visible>",
+                        "date": "<invoice date if visible>",
+                        "invoice_number": "<invoice number if visible>"
+                    }
+                    
+                    If you cannot find certain fields, use null. Always return valid JSON."""
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{image_mime};base64,{image_base64}"
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": "Extract all invoice information from this image. Return only valid JSON."
+                        }
+                    ]
+                }
+            ],
+            max_tokens=2000
+        )
+        
+        # Parse the response
+        content = response.choices[0].message.content
+        
+        # Try to extract JSON from the response (sometimes GPT wraps it in markdown)
+        import json
+        import re
+        
+        # Remove markdown code blocks if present
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
+        if json_match:
+            content = json_match.group(1)
+        else:
+            # Try to find JSON object directly
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                content = json_match.group(0)
+        
+        invoice_data = json.loads(content)
+        
+        # Save to database if invoices table exists
+        try:
+            invoice_record = {
+                "id": str(uuid.uuid4()),
+                "image_data": f"data:{image_mime};base64,{image_base64}",
+                "total_price": invoice_data.get("total_price"),
+                "currency": invoice_data.get("currency", "ILS"),
+                "vendor": invoice_data.get("vendor"),
+                "date": invoice_data.get("date"),
+                "invoice_number": invoice_data.get("invoice_number"),
+                "extracted_data": json.dumps(invoice_data, ensure_ascii=False),
+                "created_at": None  # Let Supabase set this
+            }
+            
+            resp = requests.post(
+                f"{REST_URL}/invoices",
+                headers=SERVICE_HEADERS,
+                json=invoice_record
+            )
+            # Don't fail if table doesn't exist
+            if resp.status_code == 201 or resp.status_code == 200:
+                invoice_record["saved"] = True
+        except Exception as db_error:
+            # Log but don't fail - the extraction worked
+            print(f"Warning: Could not save invoice to database: {db_error}")
+            invoice_data["saved"] = False
+        
+        return invoice_data
+        
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse OpenAI response: {str(e)}")
+    except Exception as e:
+        error_msg = str(e)
+        if "api_key" in error_msg.lower() or "authentication" in error_msg.lower():
+            raise HTTPException(status_code=401, detail="Invalid OpenAI API key")
+        raise HTTPException(status_code=500, detail=f"Error processing invoice: {error_msg}")
+
+@app.get("/api/invoices")
+def api_invoices():
+    """Alias for /invoices to match frontend expectations"""
+    return invoices()
+
 @app.get("/chat/messages")
 def chat_messages():
     try:
@@ -856,4 +1016,95 @@ def api_update_warehouse_item(warehouse_id: str, item_id: str, payload: dict):
         raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error updating warehouse item: {str(e)}")
+
+# Cleaning Schedule endpoints
+@app.get("/api/cleaning-schedule")
+def get_cleaning_schedule():
+    """Get all cleaning schedule entries"""
+    try:
+        resp = requests.get(
+            f"{REST_URL}/cleaning_schedule",
+            headers=SERVICE_HEADERS,
+            params={"select": "*", "order": "date.asc,start_time.asc"}
+        )
+        resp.raise_for_status()
+        return resp.json() or []
+    except requests.exceptions.HTTPError as e:
+        # If table doesn't exist, return empty array
+        if e.response and e.response.status_code == 404:
+            return []
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching cleaning schedule: {str(e)}")
+
+@app.post("/api/cleaning-schedule")
+def create_cleaning_schedule_entry(payload: dict):
+    """Create a new cleaning schedule entry"""
+    try:
+        data = payload.copy()
+        if not data.get("id"):
+            data["id"] = str(uuid.uuid4())
+        
+        # Validate required fields
+        if not data.get("date") or not data.get("start_time") or not data.get("end_time") or not data.get("cleaner_name"):
+            raise HTTPException(status_code=400, detail="date, start_time, end_time, and cleaner_name are required")
+        
+        resp = requests.post(
+            f"{REST_URL}/cleaning_schedule",
+            headers=SERVICE_HEADERS,
+            json=data
+        )
+        resp.raise_for_status()
+        if resp.text:
+            body = resp.json()
+            return body[0] if isinstance(body, list) and body else body
+        return data
+    except HTTPException:
+        raise
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating cleaning schedule entry: {str(e)}")
+
+@app.patch("/api/cleaning-schedule/{entry_id}")
+def update_cleaning_schedule_entry(entry_id: str, payload: dict):
+    """Update a cleaning schedule entry"""
+    try:
+        data = {k: v for k, v in payload.items() if v is not None}
+        if not data:
+            return {"message": "No changes provided"}
+        headers = {**SERVICE_HEADERS, "Prefer": "return=representation"}
+        resp = requests.patch(
+            f"{REST_URL}/cleaning_schedule?id=eq.{entry_id}",
+            headers=headers,
+            json=data
+        )
+        resp.raise_for_status()
+        if resp.text:
+            result = resp.json()
+            return result[0] if isinstance(result, list) and result else result
+        return {"id": entry_id, "message": "Updated successfully"}
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating cleaning schedule entry: {str(e)}")
+
+@app.delete("/api/cleaning-schedule/{entry_id}")
+def delete_cleaning_schedule_entry(entry_id: str):
+    """Delete a cleaning schedule entry"""
+    try:
+        resp = requests.delete(
+            f"{REST_URL}/cleaning_schedule?id=eq.{entry_id}",
+            headers=SERVICE_HEADERS
+        )
+        resp.raise_for_status()
+        return JSONResponse(content={"message": "Deleted successfully"}, status_code=200)
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting cleaning schedule entry: {str(e)}")
 
