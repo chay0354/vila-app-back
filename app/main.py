@@ -6,6 +6,7 @@ import os
 import requests
 import bcrypt
 import base64
+from datetime import datetime
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from .supabase_client import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
@@ -923,6 +924,117 @@ def attendance_logs():
 def api_attendance_logs():
     """Alias for /attendance/logs to match frontend expectations"""
     return attendance_logs()
+
+@app.get("/attendance/status/{employee}")
+def get_attendance_status(employee: str):
+    """Get current attendance status for an employee"""
+    try:
+        # Get the most recent log entry for this employee that doesn't have a clock_out
+        resp = requests.get(
+            f"{REST_URL}/attendance_logs?employee=eq.{employee}&clock_out=is.null&order=clock_in.desc&limit=1",
+            headers=SERVICE_HEADERS
+        )
+        resp.raise_for_status()
+        logs = resp.json()
+        
+        # Check if there's an active session (no clock_out)
+        is_clocked_in = False
+        session = None
+        
+        if logs and len(logs) > 0:
+            latest_log = logs[0]
+            if latest_log.get("clock_out") is None or latest_log.get("clock_out") == "":
+                is_clocked_in = True
+                session = {
+                    "clock_in": latest_log.get("clock_in"),
+                    "clock_out": latest_log.get("clock_out"),
+                    "id": latest_log.get("id")
+                }
+        
+        return {
+            "is_clocked_in": is_clocked_in,
+            "session": session
+        }
+    except requests.exceptions.HTTPError as e:
+        if e.response and e.response.status_code == 404:
+            return {"is_clocked_in": False, "session": None}
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching attendance status: {str(e)}")
+
+@app.post("/attendance/start")
+def start_attendance(payload: dict):
+    """Start attendance (clock in) for an employee"""
+    try:
+        employee = payload.get("employee")
+        if not employee:
+            raise HTTPException(status_code=400, detail="Employee name is required")
+        
+        # Create a new attendance log entry
+        log_data = {
+            "employee": employee,
+            "clock_in": datetime.now().isoformat(),
+            "clock_out": None
+        }
+        
+        resp = requests.post(
+            f"{REST_URL}/attendance_logs",
+            headers=SERVICE_HEADERS,
+            json=log_data
+        )
+        resp.raise_for_status()
+        
+        result = resp.json()
+        return result[0] if isinstance(result, list) and result else result
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error starting attendance: {str(e)}")
+
+@app.post("/attendance/stop")
+def stop_attendance(payload: dict):
+    """Stop attendance (clock out) for an employee"""
+    try:
+        employee = payload.get("employee")
+        if not employee:
+            raise HTTPException(status_code=400, detail="Employee name is required")
+        
+        # Find the most recent log entry without a clock_out
+        resp = requests.get(
+            f"{REST_URL}/attendance_logs?employee=eq.{employee}&clock_out=is.null&order=clock_in.desc&limit=1&select=id",
+            headers=SERVICE_HEADERS
+        )
+        resp.raise_for_status()
+        logs = resp.json()
+        
+        if not logs or len(logs) == 0:
+            raise HTTPException(status_code=404, detail="No active attendance session found")
+        
+        log_id = logs[0]["id"]
+        
+        # Update the log entry with clock_out time
+        update_data = {
+            "clock_out": datetime.now().isoformat()
+        }
+        
+        update_resp = requests.patch(
+            f"{REST_URL}/attendance_logs?id=eq.{log_id}",
+            headers=SERVICE_HEADERS,
+            json=update_data
+        )
+        update_resp.raise_for_status()
+        
+        result = update_resp.json()
+        return result[0] if isinstance(result, list) and result else result
+    except requests.exceptions.HTTPError as e:
+        if e.response and e.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="No active attendance session found")
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error stopping attendance: {str(e)}")
 
 # Warehouse endpoints
 @app.get("/api/warehouses")
