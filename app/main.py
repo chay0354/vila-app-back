@@ -35,7 +35,12 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    """Health check endpoint for monitoring and load balancers"""
+    return {
+        "status": "healthy",
+        "ok": True,
+        "service": "bolavila-backend"
+    }
 
 # Authentication endpoints
 class SignUpRequest(BaseModel):
