@@ -440,9 +440,13 @@ def api_create_inventory_order(payload: dict):
     """Create inventory order with frontend camelCase format"""
     # Always generate a new UUID to avoid conflicts - ignore any ID from frontend
     # Map frontend camelCase to backend snake_case
+    item_id = payload.get("itemId") or payload.get("item_id") or ""
+    
+    # If item_id is provided but empty, set to None to avoid foreign key constraint issues
+    # Supabase allows NULL for foreign keys if the column is nullable
     order_data = {
         "id": str(uuid.uuid4()),
-        "item_id": payload.get("itemId") or payload.get("item_id") or "",
+        "item_id": item_id if item_id else None,  # Set to None if empty to avoid FK constraint
         "item_name": payload.get("itemName") or payload.get("item_name", ""),
         "quantity": int(payload.get("quantity", 0)),
         "unit": payload.get("unit", ""),
