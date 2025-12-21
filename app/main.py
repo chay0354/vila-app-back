@@ -854,10 +854,22 @@ def api_reports_summary():
 @app.get("/invoices")
 def invoices():
     try:
-        resp = requests.get(f"{REST_URL}/invoices", headers=SERVICE_HEADERS, params={"select": "*"})
+        resp = requests.get(
+            f"{REST_URL}/invoices", 
+            headers=SERVICE_HEADERS, 
+            params={"select": "*", "order": "created_at.desc"}
+        )
         resp.raise_for_status()
-        return resp.json()
+        return resp.json() or []
+    except requests.exceptions.HTTPError as e:
+        # If table doesn't exist (404), return empty array
+        if e.response and e.response.status_code == 404:
+            print("Invoices table does not exist yet, returning empty array")
+            return []
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
     except Exception as e:
+        print(f"Error fetching invoices: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching invoices: {str(e)}")
 
 @app.post("/api/invoices/process")
@@ -1065,7 +1077,7 @@ Return ONLY the JSON object, nothing else."""
                 headers=SERVICE_HEADERS,
                 json=invoice_record
             )
-            # Don't fail if table doesn't exist
+            # Check if save was successful
             if resp.status_code == 201 or resp.status_code == 200:
                 invoice_record["saved"] = True
                 # Add the database ID to the response
@@ -1074,6 +1086,19 @@ Return ONLY the JSON object, nothing else."""
                     invoice_record["id"] = saved_invoice[0].get("id", invoice_record["id"])
                 elif isinstance(saved_invoice, dict):
                     invoice_record["id"] = saved_invoice.get("id", invoice_record["id"])
+                print(f"Invoice saved successfully with ID: {invoice_record.get('id')}")
+            else:
+                # Log the error but don't fail
+                error_text = resp.text[:200] if resp.text else "Unknown error"
+                print(f"Warning: Could not save invoice to database. Status: {resp.status_code}, Error: {error_text}")
+                invoice_record["saved"] = False
+        except requests.exceptions.HTTPError as http_err:
+            # Log HTTP errors
+            error_text = ""
+            if http_err.response:
+                error_text = http_err.response.text[:200] if http_err.response.text else str(http_err.response)
+            print(f"Warning: HTTP error saving invoice to database: {http_err.response.status_code if http_err.response else 'Unknown'}, Error: {error_text}")
+            invoice_data["saved"] = False
         except Exception as db_error:
             # Log but don't fail - the invoice can still be returned
             print(f"Warning: Could not save invoice to database: {db_error}")
