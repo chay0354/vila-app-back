@@ -1145,6 +1145,71 @@ def api_invoices():
     """Alias for /invoices to match frontend expectations"""
     return invoices()
 
+@app.get("/api/invoices/{invoice_id}")
+def get_invoice(invoice_id: str):
+    """Get a single invoice by ID"""
+    try:
+        resp = requests.get(
+            f"{REST_URL}/invoices",
+            headers=SERVICE_HEADERS,
+            params={"id": f"eq.{invoice_id}", "select": "*"}
+        )
+        resp.raise_for_status()
+        invoices_list = resp.json()
+        if not invoices_list or len(invoices_list) == 0:
+            raise HTTPException(status_code=404, detail="Invoice not found")
+        return invoices_list[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching invoice: {str(e)}")
+
+@app.patch("/api/invoices/{invoice_id}")
+def update_invoice(invoice_id: str, payload: dict):
+    """Update an invoice"""
+    try:
+        data = {k: v for k, v in payload.items() if v is not None}
+        if not data:
+            return {"message": "No changes provided"}
+        
+        # If extracted_data is provided, ensure it's properly formatted
+        if "extracted_data" in data and isinstance(data["extracted_data"], dict):
+            import json
+            data["extracted_data"] = json.dumps(data["extracted_data"], ensure_ascii=False)
+        
+        headers = {**SERVICE_HEADERS, "Prefer": "return=representation"}
+        resp = requests.patch(
+            f"{REST_URL}/invoices?id=eq.{invoice_id}",
+            headers=headers,
+            json=data
+        )
+        resp.raise_for_status()
+        if resp.text:
+            result = resp.json()
+            return result[0] if isinstance(result, list) and result else result
+        return {"id": invoice_id, "message": "Updated successfully"}
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating invoice: {str(e)}")
+
+@app.delete("/api/invoices/{invoice_id}")
+def delete_invoice(invoice_id: str):
+    """Delete an invoice"""
+    try:
+        resp = requests.delete(
+            f"{REST_URL}/invoices?id=eq.{invoice_id}",
+            headers=SERVICE_HEADERS
+        )
+        resp.raise_for_status()
+        return JSONResponse(content={"message": "Deleted successfully"}, status_code=200)
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting invoice: {str(e)}")
+
 @app.get("/chat/messages")
 def chat_messages():
     try:
