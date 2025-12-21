@@ -498,13 +498,30 @@ def api_create_inventory_order(payload: dict):
     # Generate UUID for order
     order_id = str(uuid.uuid4())
     
-    # Create order data (without item-specific fields)
+    # Create order data
+    # For backward compatibility, include item fields if items array exists
+    first_item = items[0] if items else None
+    
     order_data = {
         "id": order_id,
         "order_date": payload.get("orderDate") or payload.get("order_date", ""),
         "status": payload.get("status", "ממתין לאישור"),
         "order_type": payload.get("orderType") or payload.get("order_type", "הזמנה כללית"),
     }
+    
+    # Backward compatibility: include item fields for old table structure
+    # These will be ignored if using new two-table structure
+    if first_item:
+        order_data["item_id"] = first_item.get("itemId") or first_item.get("item_id") or None
+        order_data["item_name"] = first_item.get("itemName") or first_item.get("item_name", "")
+        order_data["quantity"] = int(first_item.get("quantity", 0))
+        order_data["unit"] = first_item.get("unit", "")
+    else:
+        # Fallback for legacy single-item requests
+        order_data["item_id"] = payload.get("itemId") or payload.get("item_id") or None
+        order_data["item_name"] = payload.get("itemName") or payload.get("item_name", "")
+        order_data["quantity"] = int(payload.get("quantity", 0))
+        order_data["unit"] = payload.get("unit", "")
     
     # Optional fields - only add if provided
     if payload.get("deliveryDate") or payload.get("delivery_date"):
