@@ -907,6 +907,10 @@ async def process_invoice(request: Request):
         else:
             raise HTTPException(status_code=400, detail="Content-Type must be multipart/form-data or application/json")
         
+        # Import json and re at the function level to avoid scoping issues
+        import json
+        import re
+        
         # Store image data for saving even if OpenAI fails
         image_data_uri = f"data:{image_mime};base64,{image_base64}"
         
@@ -981,9 +985,6 @@ Return ONLY the JSON object, nothing else."""
             )
             
             # Parse the response
-            import json
-            import re
-            
             content = response.choices[0].message.content if response.choices and response.choices[0].message.content else ""
             
             # Try to extract and parse JSON from the response
