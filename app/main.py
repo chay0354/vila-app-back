@@ -397,9 +397,65 @@ def delete_inventory_item(item_id: str):
 @app.get("/inventory/orders")
 def inventory_orders():
     try:
-        resp = requests.get(f"{REST_URL}/inventory_orders", headers=SERVICE_HEADERS, params={"select": "*"})
-        resp.raise_for_status()
-        return resp.json()
+        # Get orders with their items using a join query
+        # First get all orders
+        orders_resp = requests.get(
+            f"{REST_URL}/inventory_orders", 
+            headers=SERVICE_HEADERS, 
+            params={"select": "*", "order": "order_date.desc"}
+        )
+        orders_resp.raise_for_status()
+        orders = orders_resp.json()
+        
+        # Get all order items (if table exists)
+        items_by_order = {}
+        try:
+            items_resp = requests.get(
+                f"{REST_URL}/inventory_order_items",
+                headers=SERVICE_HEADERS,
+                params={"select": "*"}
+            )
+            items_resp.raise_for_status()
+            all_items = items_resp.json()
+            
+            # Group items by order_id
+            for item in all_items:
+                order_id = item.get("order_id")
+                if order_id:
+                    if order_id not in items_by_order:
+                        items_by_order[order_id] = []
+                    items_by_order[order_id].append({
+                        "id": item.get("id"),
+                        "item_id": item.get("item_id"),
+                        "item_name": item.get("item_name"),
+                        "quantity": item.get("quantity"),
+                        "unit": item.get("unit", ""),
+                    })
+        except Exception as e:
+            # Table might not exist yet - that's OK, we'll use legacy fields
+            print(f"Note: inventory_order_items table may not exist yet: {e}")
+            pass
+        
+        # Combine orders with their items
+        result = []
+        for order in orders:
+            order_id = order.get("id")
+            order_with_items = order.copy()
+            # Add items array if items exist, otherwise create from legacy fields
+            if order_id in items_by_order:
+                order_with_items["items"] = items_by_order[order_id]
+            else:
+                # Fallback for old structure (backward compatibility)
+                order_with_items["items"] = [{
+                    "id": order_id + "-item",
+                    "item_id": order.get("item_id"),
+                    "item_name": order.get("item_name", ""),
+                    "quantity": order.get("quantity", 0),
+                    "unit": order.get("unit", ""),
+                }] if order.get("item_name") else []
+            result.append(order_with_items)
+        
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching inventory orders: {str(e)}")
 
@@ -438,20 +494,13 @@ def create_inventory_order(payload: dict):
 
 @app.post("/api/inventory/orders")
 def api_create_inventory_order(payload: dict):
-    """Create inventory order with frontend camelCase format"""
-    # Always generate a new UUID to avoid conflicts - ignore any ID from frontend
-    # Map frontend camelCase to backend snake_case
-    item_id = payload.get("itemId") or payload.get("item_id") or ""
+    """Create inventory order with items (two-table structure)"""
+    # Generate UUID for order
+    order_id = str(uuid.uuid4())
     
-    # If item_id is provided but empty, set to None to avoid foreign key constraint issues
-    # Supabase allows NULL for foreign keys if the column is nullable
-    # Generate UUID for id - ensure uniqueness
+    # Create order data (without item-specific fields)
     order_data = {
-        "id": str(uuid.uuid4()),
-        "item_id": item_id if item_id else None,  # Set to None if empty to avoid FK constraint
-        "item_name": payload.get("itemName") or payload.get("item_name", ""),
-        "quantity": int(payload.get("quantity", 0)),
-        "unit": payload.get("unit", ""),
+        "id": order_id,
         "order_date": payload.get("orderDate") or payload.get("order_date", ""),
         "status": payload.get("status", "ממתין לאישור"),
         "order_type": payload.get("orderType") or payload.get("order_type", "הזמנה כללית"),
@@ -465,27 +514,121 @@ def api_create_inventory_order(payload: dict):
     if payload.get("unitNumber") or payload.get("unit_number"):
         order_data["unit_number"] = payload.get("unitNumber") or payload.get("unit_number")
     
-    # Log the data being sent for debugging
-    print(f"Creating inventory order with ID: {order_data['id']}")
-    print(f"Order data: {order_data}")
+    # Get items from payload (new structure)
+    items = payload.get("items", [])
     
-    return create_inventory_order(order_data)
+    # Fallback: if no items array, create from legacy fields (backward compatibility)
+    if not items and (payload.get("itemName") or payload.get("item_name")):
+        items = [{
+            "itemId": payload.get("itemId") or payload.get("item_id"),
+            "itemName": payload.get("itemName") or payload.get("item_name", ""),
+            "quantity": payload.get("quantity", 0),
+            "unit": payload.get("unit", ""),
+        }]
+    
+    if not items:
+        raise HTTPException(status_code=400, detail="Order must have at least one item")
+    
+    try:
+        # Step 1: Create the order
+        order_resp = requests.post(
+            f"{REST_URL}/inventory_orders", 
+            headers=SERVICE_HEADERS, 
+            json=order_data
+        )
+        order_resp.raise_for_status()
+        created_order = order_resp.json()
+        if isinstance(created_order, list) and created_order:
+            created_order = created_order[0]
+        
+        # Step 2: Create order items
+        created_items = []
+        for item in items:
+            item_data = {
+                "id": str(uuid.uuid4()),
+                "order_id": order_id,
+                "item_id": item.get("itemId") or item.get("item_id") or None,
+                "item_name": item.get("itemName") or item.get("item_name", ""),
+                "quantity": int(item.get("quantity", 0)),
+                "unit": item.get("unit", ""),
+            }
+            
+            item_resp = requests.post(
+                f"{REST_URL}/inventory_order_items",
+                headers=SERVICE_HEADERS,
+                json=item_data
+            )
+            item_resp.raise_for_status()
+            created_item = item_resp.json()
+            if isinstance(created_item, list) and created_item:
+                created_item = created_item[0]
+            created_items.append({
+                "id": created_item.get("id"),
+                "item_id": created_item.get("item_id"),
+                "item_name": created_item.get("item_name"),
+                "quantity": created_item.get("quantity"),
+                "unit": created_item.get("unit", ""),
+            })
+        
+        # Return order with items
+        result = created_order.copy()
+        result["items"] = created_items
+        return result
+        
+    except requests.exceptions.HTTPError as e:
+        error_text = ""
+        if e.response:
+            try:
+                error_text = e.response.text
+            except:
+                error_text = str(e.response)
+        error_detail = f"HTTP {e.response.status_code}: {error_text[:500]}" if e.response else str(e)
+        print(f"Error creating inventory order. Order data: {order_data}")
+        print(f"Items: {items}")
+        print(f"Full error: {error_detail}")
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating inventory order: {str(e)}")
 
 @app.patch("/inventory/orders/{order_id}")
 def update_inventory_order(order_id: str, payload: dict):
-    data = {k: v for k, v in payload.items() if v is not None}
-    if not data:
+    """Update inventory order (status, delivery_date, etc.)"""
+    # Map camelCase to snake_case for order fields
+    order_data = {}
+    if "status" in payload:
+        order_data["status"] = payload["status"]
+    if "deliveryDate" in payload or "delivery_date" in payload:
+        order_data["delivery_date"] = payload.get("deliveryDate") or payload.get("delivery_date")
+    if "orderType" in payload or "order_type" in payload:
+        order_data["order_type"] = payload.get("orderType") or payload.get("order_type")
+    if "orderedBy" in payload or "ordered_by" in payload:
+        order_data["ordered_by"] = payload.get("orderedBy") or payload.get("ordered_by")
+    if "unitNumber" in payload or "unit_number" in payload:
+        order_data["unit_number"] = payload.get("unitNumber") or payload.get("unit_number")
+    
+    # Also accept snake_case directly
+    for key in ["status", "delivery_date", "order_type", "ordered_by", "unit_number"]:
+        if key in payload and key not in order_data:
+            order_data[key] = payload[key]
+    
+    if not order_data:
         return []
+    
     try:
         resp = requests.patch(
             f"{REST_URL}/inventory_orders?id=eq.{order_id}",
             headers=SERVICE_HEADERS,
-            json=data
+            json=order_data
         )
         resp.raise_for_status()
         return resp.json() if resp.text else []
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error updating inventory order: {str(e)}")
+
+@app.patch("/api/inventory/orders/{order_id}")
+def api_update_inventory_order(order_id: str, payload: dict):
+    """Alias for /inventory/orders/{order_id} to match frontend expectations"""
+    return update_inventory_order(order_id, payload)
 
 @app.delete("/inventory/orders/{order_id}")
 def delete_inventory_order(order_id: str):
