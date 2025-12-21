@@ -498,10 +498,25 @@ def api_create_inventory_order(payload: dict):
     # Generate UUID for order
     order_id = str(uuid.uuid4())
     
-    # Create order data
-    # For backward compatibility, include item fields if items array exists
+    # Get items from payload (new structure)
+    items = payload.get("items", [])
+    
+    # Fallback: if no items array, create from legacy fields (backward compatibility)
+    if not items and (payload.get("itemName") or payload.get("item_name")):
+        items = [{
+            "itemId": payload.get("itemId") or payload.get("item_id"),
+            "itemName": payload.get("itemName") or payload.get("item_name", ""),
+            "quantity": payload.get("quantity", 0),
+            "unit": payload.get("unit", ""),
+        }]
+    
+    if not items:
+        raise HTTPException(status_code=400, detail="Order must have at least one item")
+    
+    # Get first item for backward compatibility with old table structure
     first_item = items[0] if items else None
     
+    # Create order data
     order_data = {
         "id": order_id,
         "order_date": payload.get("orderDate") or payload.get("order_date", ""),
@@ -510,7 +525,7 @@ def api_create_inventory_order(payload: dict):
     }
     
     # Backward compatibility: include item fields for old table structure
-    # These will be ignored if using new two-table structure
+    # These are required by the current database schema
     if first_item:
         order_data["item_id"] = first_item.get("itemId") or first_item.get("item_id") or None
         order_data["item_name"] = first_item.get("itemName") or first_item.get("item_name", "")
@@ -530,21 +545,6 @@ def api_create_inventory_order(payload: dict):
         order_data["ordered_by"] = payload.get("orderedBy") or payload.get("ordered_by")
     if payload.get("unitNumber") or payload.get("unit_number"):
         order_data["unit_number"] = payload.get("unitNumber") or payload.get("unit_number")
-    
-    # Get items from payload (new structure)
-    items = payload.get("items", [])
-    
-    # Fallback: if no items array, create from legacy fields (backward compatibility)
-    if not items and (payload.get("itemName") or payload.get("item_name")):
-        items = [{
-            "itemId": payload.get("itemId") or payload.get("item_id"),
-            "itemName": payload.get("itemName") or payload.get("item_name", ""),
-            "quantity": payload.get("quantity", 0),
-            "unit": payload.get("unit", ""),
-        }]
-    
-    if not items:
-        raise HTTPException(status_code=400, detail="Order must have at least one item")
     
     try:
         # Step 1: Create the order
