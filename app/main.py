@@ -907,38 +907,59 @@ async def process_invoice(request: Request):
         else:
             raise HTTPException(status_code=400, detail="Content-Type must be multipart/form-data or application/json")
         
+        # Store image data for saving even if OpenAI fails
+        image_data_uri = f"data:{image_mime};base64,{image_base64}"
+        
         # Initialize OpenAI client
         client = OpenAI(api_key=openai_key)
         
-        # Call OpenAI Vision API
-        response = client.chat.completions.create(
-            model="gpt-4o",
+        # Initialize default invoice data (empty fields) - will be used if OpenAI fails
+        invoice_data = {
+            "total_price": None,
+            "currency": "ILS",
+            "items": [],
+            "vendor": None,
+            "date": None,
+            "invoice_number": None
+        }
+        
+        # Try to call OpenAI Vision API
+        try:
+            response = client.chat.completions.create(
+                model="gpt-5.1",
             messages=[
                 {
                     "role": "system",
                     "content": """You are an expert at extracting invoice data from images. 
-                    Analyze the invoice image and extract:
-                    1. Total price (the final amount to pay)
-                    2. A list of items with their individual prices
-                    
-                    Return the data in JSON format with this structure:
-                    {
-                        "total_price": <number>,
-                        "currency": "<currency code like ILS, USD, EUR>",
-                        "items": [
-                            {
-                                "name": "<item name>",
-                                "quantity": <number>,
-                                "unit_price": <number>,
-                                "total_price": <number>
-                            }
-                        ],
-                        "vendor": "<vendor/supplier name if visible>",
-                        "date": "<invoice date if visible>",
-                        "invoice_number": "<invoice number if visible>"
-                    }
-                    
-                    If you cannot find certain fields, use null. Always return valid JSON."""
+
+CRITICAL: You MUST respond with ONLY valid JSON. No markdown, no code blocks, no explanations, no text before or after the JSON. Just the raw JSON object.
+
+The JSON structure MUST be exactly:
+{
+    "total_price": <number or null>,
+    "currency": "<string or null>",
+    "items": [
+        {
+            "name": "<string>",
+            "quantity": <number>,
+            "unit_price": <number>,
+            "total_price": <number>
+        }
+    ],
+    "vendor": "<string or null>",
+    "date": "<string or null>",
+    "invoice_number": "<string or null>"
+}
+
+Rules:
+- If a field is not found, use null (not empty string, not 0, use null)
+- total_price must be a number or null
+- currency must be a string like "ILS", "USD", "EUR" or null
+- items must be an array (can be empty [])
+- Each item must have name (string), quantity (number), unit_price (number), total_price (number)
+- vendor, date, invoice_number must be strings or null
+
+Return ONLY the JSON object, nothing else."""
                 },
                 {
                     "role": "user",
@@ -951,47 +972,93 @@ async def process_invoice(request: Request):
                         },
                         {
                             "type": "text",
-                            "text": "Extract all invoice information from this image. Return only valid JSON."
+                            "text": "Extract invoice data from this image. Return ONLY valid JSON with no markdown, no code blocks, no explanations. Just the raw JSON object starting with { and ending with }."
                         }
                     ]
                 }
             ],
-            max_tokens=2000
-        )
-        
-        # Parse the response
-        content = response.choices[0].message.content
-        
-        # Try to extract JSON from the response (sometimes GPT wraps it in markdown)
-        import json
-        import re
-        
-        # Remove markdown code blocks if present
-        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', content, re.DOTALL)
-        if json_match:
-            content = json_match.group(1)
-        else:
-            # Try to find JSON object directly
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if json_match:
-                content = json_match.group(0)
-        
-        invoice_data = json.loads(content)
-        
-        # Save to database if invoices table exists
-        try:
-            invoice_record = {
-                "id": str(uuid.uuid4()),
-                "image_data": f"data:{image_mime};base64,{image_base64}",
-                "total_price": invoice_data.get("total_price"),
-                "currency": invoice_data.get("currency", "ILS"),
-                "vendor": invoice_data.get("vendor"),
-                "date": invoice_data.get("date"),
-                "invoice_number": invoice_data.get("invoice_number"),
-                "extracted_data": json.dumps(invoice_data, ensure_ascii=False),
-                "created_at": None  # Let Supabase set this
-            }
+                max_tokens=2000
+            )
             
+            # Parse the response
+            import json
+            import re
+            
+            content = response.choices[0].message.content if response.choices and response.choices[0].message.content else ""
+            
+            # Try to extract and parse JSON from the response
+            if content:
+                try:
+                    # First, try to find JSON object (handle markdown code blocks if present)
+                    json_content = content.strip()
+                    
+                    # Remove markdown code blocks if present (```json ... ``` or ``` ... ```)
+                    json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', json_content, re.DOTALL)
+                    if json_match:
+                        json_content = json_match.group(1).strip()
+                    else:
+                        # Try to find JSON object directly (from { to matching })
+                        json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', json_content, re.DOTALL)
+                        if json_match:
+                            json_content = json_match.group(0).strip()
+                        else:
+                            # Last resort: try to find anything between first { and last }
+                            first_brace = json_content.find('{')
+                            last_brace = json_content.rfind('}')
+                            if first_brace >= 0 and last_brace > first_brace:
+                                json_content = json_content[first_brace:last_brace + 1].strip()
+                    
+                    # Try to parse the JSON
+                    parsed_data = json.loads(json_content)
+                    
+                    # Validate and merge parsed data with defaults
+                    if isinstance(parsed_data, dict):
+                        # Ensure all required fields exist with proper types
+                        if "total_price" in parsed_data and parsed_data["total_price"] is not None:
+                            try:
+                                invoice_data["total_price"] = float(parsed_data["total_price"])
+                            except (ValueError, TypeError):
+                                invoice_data["total_price"] = None
+                        
+                        if "currency" in parsed_data:
+                            invoice_data["currency"] = str(parsed_data["currency"]) if parsed_data["currency"] else "ILS"
+                        
+                        if "items" in parsed_data and isinstance(parsed_data["items"], list):
+                            invoice_data["items"] = parsed_data["items"]
+                        
+                        if "vendor" in parsed_data:
+                            invoice_data["vendor"] = str(parsed_data["vendor"]) if parsed_data["vendor"] else None
+                        
+                        if "date" in parsed_data:
+                            invoice_data["date"] = str(parsed_data["date"]) if parsed_data["date"] else None
+                        
+                        if "invoice_number" in parsed_data:
+                            invoice_data["invoice_number"] = str(parsed_data["invoice_number"]) if parsed_data["invoice_number"] else None
+                except (json.JSONDecodeError, AttributeError, KeyError, ValueError, TypeError) as parse_error:
+                    # If parsing fails, log the error but continue with empty fields
+                    print(f"Warning: Could not parse OpenAI response: {parse_error}")
+                    print(f"Response content (first 500 chars): {content[:500]}")  # Log first 500 chars for debugging
+                    # Continue with empty invoice_data - user can edit manually
+        except Exception as openai_error:
+            # If OpenAI call fails (network, API error, etc.), log and continue with empty fields
+            print(f"Warning: OpenAI API call failed: {openai_error}")
+            print("Saving invoice with empty fields - user can edit manually")
+            # Continue with empty invoice_data - user can edit manually
+        
+        # Save to database if invoices table exists (always save, even with empty fields)
+        invoice_record = {
+            "id": str(uuid.uuid4()),
+            "image_data": image_data_uri,
+            "total_price": invoice_data.get("total_price"),
+            "currency": invoice_data.get("currency", "ILS"),
+            "vendor": invoice_data.get("vendor"),
+            "date": invoice_data.get("date"),
+            "invoice_number": invoice_data.get("invoice_number"),
+            "extracted_data": json.dumps(invoice_data, ensure_ascii=False),
+            "created_at": None  # Let Supabase set this
+        }
+        
+        try:
             resp = requests.post(
                 f"{REST_URL}/invoices",
                 headers=SERVICE_HEADERS,
@@ -1000,17 +1067,74 @@ async def process_invoice(request: Request):
             # Don't fail if table doesn't exist
             if resp.status_code == 201 or resp.status_code == 200:
                 invoice_record["saved"] = True
+                # Add the database ID to the response
+                saved_invoice = resp.json()
+                if isinstance(saved_invoice, list) and saved_invoice:
+                    invoice_record["id"] = saved_invoice[0].get("id", invoice_record["id"])
+                elif isinstance(saved_invoice, dict):
+                    invoice_record["id"] = saved_invoice.get("id", invoice_record["id"])
         except Exception as db_error:
-            # Log but don't fail - the extraction worked
+            # Log but don't fail - the invoice can still be returned
             print(f"Warning: Could not save invoice to database: {db_error}")
             invoice_data["saved"] = False
         
-        return invoice_data
+        # Add the saved status and ID to the response
+        invoice_data["saved"] = invoice_record.get("saved", False)
+        invoice_data["id"] = invoice_record.get("id")
+        invoice_data["image_data"] = invoice_record.get("image_data")
         
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse OpenAI response: {str(e)}")
+        return invoice_data
+    except HTTPException:
+        # Re-raise HTTP exceptions (like 400, 401, etc.)
+        raise
     except Exception as e:
+        # For any other unexpected errors, try to save the invoice with empty fields
         error_msg = str(e)
+        print(f"Unexpected error processing invoice: {error_msg}")
+        
+        # If we have the image data, try to save it with empty fields
+        try:
+            if 'image_data_uri' in locals() or 'image_base64' in locals():
+                invoice_record = {
+                    "id": str(uuid.uuid4()),
+                    "image_data": image_data_uri if 'image_data_uri' in locals() else f"data:{image_mime};base64,{image_base64}",
+                    "total_price": None,
+                    "currency": "ILS",
+                    "vendor": None,
+                    "date": None,
+                    "invoice_number": None,
+                    "extracted_data": "{}",
+                    "created_at": None
+                }
+                
+                resp = requests.post(
+                    f"{REST_URL}/invoices",
+                    headers=SERVICE_HEADERS,
+                    json=invoice_record
+                )
+                if resp.status_code == 201 or resp.status_code == 200:
+                    saved_invoice = resp.json()
+                    if isinstance(saved_invoice, list) and saved_invoice:
+                        invoice_record["id"] = saved_invoice[0].get("id", invoice_record["id"])
+                    elif isinstance(saved_invoice, dict):
+                        invoice_record["id"] = saved_invoice.get("id", invoice_record["id"])
+                    
+                    # Return the saved invoice with empty fields
+                    return {
+                        "id": invoice_record["id"],
+                        "total_price": None,
+                        "currency": "ILS",
+                        "items": [],
+                        "vendor": None,
+                        "date": None,
+                        "invoice_number": None,
+                        "image_data": invoice_record["image_data"],
+                        "saved": True
+                    }
+        except Exception as save_error:
+            print(f"Could not save invoice after error: {save_error}")
+        
+        # If we can't save, still raise the original error
         if "api_key" in error_msg.lower() or "authentication" in error_msg.lower():
             raise HTTPException(status_code=401, detail="Invalid OpenAI API key")
         raise HTTPException(status_code=500, detail=f"Error processing invoice: {error_msg}")
