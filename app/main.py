@@ -1216,7 +1216,7 @@ def api_invoices():
 
 @app.get("/api/invoices/{invoice_id}")
 def get_invoice(invoice_id: str):
-    """Get a single invoice by ID"""
+    """Get a single invoice by ID - maps to frontend format"""
     try:
         resp = requests.get(
             f"{REST_URL}/invoices",
@@ -1227,7 +1227,20 @@ def get_invoice(invoice_id: str):
         invoices_list = resp.json()
         if not invoices_list or len(invoices_list) == 0:
             raise HTTPException(status_code=404, detail="Invoice not found")
-        return invoices_list[0]
+        db_invoice = invoices_list[0]
+        # Map database columns to frontend format
+        return {
+            "id": str(db_invoice.get("id", "")),
+            "image_data": db_invoice.get("file_url", ""),
+            "total_price": db_invoice.get("amount"),
+            "currency": "ILS",
+            "vendor": db_invoice.get("vendor"),
+            "date": db_invoice.get("issued_at"),
+            "invoice_number": db_invoice.get("invoice_number"),
+            "extracted_data": None,
+            "created_at": db_invoice.get("issued_at"),
+            "updated_at": db_invoice.get("issued_at"),
+        }
     except HTTPException:
         raise
     except Exception as e:
