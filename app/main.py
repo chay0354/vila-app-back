@@ -1303,13 +1303,22 @@ def get_cleaning_schedule():
         resp.raise_for_status()
         return resp.json() or []
     except requests.exceptions.HTTPError as e:
-        # If table doesn't exist, return empty array
-        if e.response and e.response.status_code == 404:
+        # If table doesn't exist (404) or any other error, return empty array gracefully
+        if e.response:
+            status_code = e.response.status_code
+            if status_code == 404:
+                # Table doesn't exist yet - return empty array
+                return []
+            # For other HTTP errors, still return empty array to avoid breaking the frontend
+            print(f"Warning: Error fetching cleaning schedule (HTTP {status_code}): {e.response.text[:200]}")
             return []
-        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
-        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+        # Network or other errors - return empty array
+        print(f"Warning: Error fetching cleaning schedule: {str(e)}")
+        return []
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching cleaning schedule: {str(e)}")
+        # Any other exception - return empty array gracefully
+        print(f"Warning: Error fetching cleaning schedule: {str(e)}")
+        return []
 
 @app.post("/api/cleaning-schedule")
 def create_cleaning_schedule_entry(payload: dict):
