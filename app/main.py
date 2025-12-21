@@ -1345,6 +1345,12 @@ def create_cleaning_schedule_entry(payload: dict):
     except HTTPException:
         raise
     except requests.exceptions.HTTPError as e:
+        # If table doesn't exist (404), provide a helpful error message
+        if e.response and e.response.status_code == 404:
+            raise HTTPException(
+                status_code=404, 
+                detail="Cleaning schedule table does not exist. Please create the table in Supabase first."
+            )
         error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
         raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
     except Exception as e:
