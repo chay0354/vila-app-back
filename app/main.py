@@ -853,19 +853,66 @@ def api_reports_summary():
 
 @app.get("/invoices")
 def invoices():
+    """Get all invoices - maps to actual table schema: id, vendor, invoice_number, amount, payment_method, issued_at, file_url"""
     try:
+        # Try with order by issued_at (actual column name)
         resp = requests.get(
             f"{REST_URL}/invoices", 
             headers=SERVICE_HEADERS, 
-            params={"select": "*", "order": "created_at.desc"}
+            params={"select": "*", "order": "issued_at.desc"}
         )
         resp.raise_for_status()
-        return resp.json() or []
+        invoices = resp.json() or []
+        # Map database columns to frontend format
+        mapped_invoices = []
+        for inv in invoices:
+            mapped = {
+                "id": str(inv.get("id", "")),
+                "image_data": inv.get("file_url", ""),  # Map file_url to image_data
+                "total_price": inv.get("amount"),  # Map amount to total_price
+                "currency": "ILS",  # Default since not in table
+                "vendor": inv.get("vendor"),
+                "date": inv.get("issued_at"),  # Map issued_at to date
+                "invoice_number": inv.get("invoice_number"),
+                "extracted_data": None,  # Not stored in table
+                "created_at": inv.get("issued_at"),  # Use issued_at as created_at
+                "updated_at": inv.get("issued_at"),
+            }
+            mapped_invoices.append(mapped)
+        return mapped_invoices
     except requests.exceptions.HTTPError as e:
-        # If table doesn't exist (404), return empty array
-        if e.response and e.response.status_code == 404:
-            print("Invoices table does not exist yet, returning empty array")
-            return []
+        # If table doesn't exist (404) or bad request (400), try without order
+        if e.response and (e.response.status_code == 404 or e.response.status_code == 400):
+            try:
+                # Try without order parameter
+                resp = requests.get(
+                    f"{REST_URL}/invoices", 
+                    headers=SERVICE_HEADERS, 
+                    params={"select": "*"}
+                )
+                resp.raise_for_status()
+                invoices = resp.json() or []
+                # Map database columns to frontend format
+                mapped_invoices = []
+                for inv in invoices:
+                    mapped = {
+                        "id": str(inv.get("id", "")),
+                        "image_data": inv.get("file_url", ""),
+                        "total_price": inv.get("amount"),
+                        "currency": "ILS",
+                        "vendor": inv.get("vendor"),
+                        "date": inv.get("issued_at"),
+                        "invoice_number": inv.get("invoice_number"),
+                        "extracted_data": None,
+                        "created_at": inv.get("issued_at"),
+                        "updated_at": inv.get("issued_at"),
+                    }
+                    mapped_invoices.append(mapped)
+                return mapped_invoices
+            except:
+                # If that also fails, table probably doesn't exist
+                print("Invoices table does not exist yet, returning empty array")
+                return []
         error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
         raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
     except Exception as e:
@@ -1058,17 +1105,15 @@ Return ONLY the JSON object, nothing else."""
             print("Saving invoice with empty fields - user can edit manually")
             # Continue with empty invoice_data - user can edit manually
         
-        # Save to database if invoices table exists (always save, even with empty fields)
+        # Save to database - map to actual table schema: id (int8 auto), vendor, invoice_number, amount, payment_method, issued_at, file_url
         invoice_record = {
-            "id": str(uuid.uuid4()),
-            "image_data": image_data_uri,
-            "total_price": invoice_data.get("total_price"),
-            "currency": invoice_data.get("currency", "ILS"),
+            # Don't send id - let Supabase auto-generate as int8
+            "file_url": image_data_uri,  # Map image_data to file_url
+            "amount": invoice_data.get("total_price"),  # Map total_price to amount
             "vendor": invoice_data.get("vendor"),
-            "date": invoice_data.get("date"),
             "invoice_number": invoice_data.get("invoice_number"),
-            "extracted_data": json.dumps(invoice_data, ensure_ascii=False),
-            "created_at": None  # Let Supabase set this
+            "issued_at": invoice_data.get("date"),  # Map date to issued_at
+            "payment_method": None  # Not extracted, can be null
         }
         
         try:
@@ -1079,19 +1124,20 @@ Return ONLY the JSON object, nothing else."""
             )
             # Check if save was successful
             if resp.status_code == 201 or resp.status_code == 200:
-                invoice_record["saved"] = True
-                # Add the database ID to the response
                 saved_invoice = resp.json()
+                saved_id = None
                 if isinstance(saved_invoice, list) and saved_invoice:
-                    invoice_record["id"] = saved_invoice[0].get("id", invoice_record["id"])
+                    saved_id = saved_invoice[0].get("id")
                 elif isinstance(saved_invoice, dict):
-                    invoice_record["id"] = saved_invoice.get("id", invoice_record["id"])
-                print(f"Invoice saved successfully with ID: {invoice_record.get('id')}")
+                    saved_id = saved_invoice.get("id")
+                print(f"Invoice saved successfully with ID: {saved_id}")
+                invoice_data["saved"] = True
+                invoice_data["id"] = str(saved_id) if saved_id else None
             else:
                 # Log the error but don't fail
                 error_text = resp.text[:200] if resp.text else "Unknown error"
                 print(f"Warning: Could not save invoice to database. Status: {resp.status_code}, Error: {error_text}")
-                invoice_record["saved"] = False
+                invoice_data["saved"] = False
         except requests.exceptions.HTTPError as http_err:
             # Log HTTP errors
             error_text = ""
@@ -1104,10 +1150,8 @@ Return ONLY the JSON object, nothing else."""
             print(f"Warning: Could not save invoice to database: {db_error}")
             invoice_data["saved"] = False
         
-        # Add the saved status and ID to the response
-        invoice_data["saved"] = invoice_record.get("saved", False)
-        invoice_data["id"] = invoice_record.get("id")
-        invoice_data["image_data"] = invoice_record.get("image_data")
+        # Add image_data to response (frontend expects this)
+        invoice_data["image_data"] = image_data_uri
         
         return invoice_data
     except HTTPException:
@@ -1121,16 +1165,15 @@ Return ONLY the JSON object, nothing else."""
         # If we have the image data, try to save it with empty fields
         try:
             if 'image_data_uri' in locals() or 'image_base64' in locals():
+                image_uri = image_data_uri if 'image_data_uri' in locals() else f"data:{image_mime};base64,{image_base64}"
                 invoice_record = {
-                    "id": str(uuid.uuid4()),
-                    "image_data": image_data_uri if 'image_data_uri' in locals() else f"data:{image_mime};base64,{image_base64}",
-                    "total_price": None,
-                    "currency": "ILS",
+                    # Map to actual table schema
+                    "file_url": image_uri,
+                    "amount": None,
                     "vendor": None,
-                    "date": None,
                     "invoice_number": None,
-                    "extracted_data": "{}",
-                    "created_at": None
+                    "issued_at": None,
+                    "payment_method": None
                 }
                 
                 resp = requests.post(
@@ -1140,21 +1183,22 @@ Return ONLY the JSON object, nothing else."""
                 )
                 if resp.status_code == 201 or resp.status_code == 200:
                     saved_invoice = resp.json()
+                    saved_id = None
                     if isinstance(saved_invoice, list) and saved_invoice:
-                        invoice_record["id"] = saved_invoice[0].get("id", invoice_record["id"])
+                        saved_id = saved_invoice[0].get("id")
                     elif isinstance(saved_invoice, dict):
-                        invoice_record["id"] = saved_invoice.get("id", invoice_record["id"])
+                        saved_id = saved_invoice.get("id")
                     
-                    # Return the saved invoice with empty fields
+                    # Return the saved invoice with empty fields (frontend format)
                     return {
-                        "id": invoice_record["id"],
+                        "id": str(saved_id) if saved_id else None,
                         "total_price": None,
                         "currency": "ILS",
                         "items": [],
                         "vendor": None,
                         "date": None,
                         "invoice_number": None,
-                        "image_data": invoice_record["image_data"],
+                        "image_data": image_uri,
                         "saved": True
                     }
         except Exception as save_error:
@@ -1191,16 +1235,25 @@ def get_invoice(invoice_id: str):
 
 @app.patch("/api/invoices/{invoice_id}")
 def update_invoice(invoice_id: str, payload: dict):
-    """Update an invoice"""
+    """Update an invoice - maps frontend fields to database schema"""
     try:
-        data = {k: v for k, v in payload.items() if v is not None}
+        # Map frontend fields to database columns
+        data = {}
+        if "total_price" in payload:
+            data["amount"] = payload["total_price"]  # Map total_price to amount
+        if "image_data" in payload:
+            data["file_url"] = payload["image_data"]  # Map image_data to file_url
+        if "vendor" in payload:
+            data["vendor"] = payload["vendor"]
+        if "invoice_number" in payload:
+            data["invoice_number"] = payload["invoice_number"]
+        if "date" in payload:
+            data["issued_at"] = payload["date"]  # Map date to issued_at
+        if "payment_method" in payload:
+            data["payment_method"] = payload["payment_method"]
+        
         if not data:
             return {"message": "No changes provided"}
-        
-        # If extracted_data is provided, ensure it's properly formatted
-        if "extracted_data" in data and isinstance(data["extracted_data"], dict):
-            import json
-            data["extracted_data"] = json.dumps(data["extracted_data"], ensure_ascii=False)
         
         headers = {**SERVICE_HEADERS, "Prefer": "return=representation"}
         resp = requests.patch(
@@ -1211,7 +1264,20 @@ def update_invoice(invoice_id: str, payload: dict):
         resp.raise_for_status()
         if resp.text:
             result = resp.json()
-            return result[0] if isinstance(result, list) and result else result
+            db_invoice = result[0] if isinstance(result, list) and result else result
+            # Map back to frontend format
+            return {
+                "id": str(db_invoice.get("id", "")),
+                "image_data": db_invoice.get("file_url", ""),
+                "total_price": db_invoice.get("amount"),
+                "currency": "ILS",
+                "vendor": db_invoice.get("vendor"),
+                "date": db_invoice.get("issued_at"),
+                "invoice_number": db_invoice.get("invoice_number"),
+                "extracted_data": None,
+                "created_at": db_invoice.get("issued_at"),
+                "updated_at": db_invoice.get("issued_at"),
+            }
         return {"id": invoice_id, "message": "Updated successfully"}
     except requests.exceptions.HTTPError as e:
         error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
