@@ -928,8 +928,9 @@ def monthly_income_expenses():
                 
                 # If still no date, use created_at or current month as fallback
                 if not invoice_date:
-                    invoice_date = invoice.get("created_at")
+                    invoice_date = invoice.get("created_at") or datetime.now().strftime("%Y-%m-%d")
                 
+                # Always process the invoice (even if we use fallback date)
                 if invoice_date:
                     try:
                         # Parse date and get YYYY-MM format
@@ -945,18 +946,29 @@ def monthly_income_expenses():
                             date_obj = invoice_date
                         month_key = date_obj.strftime("%Y-%m")
                         
-                        # Get amount from different possible fields
-                        amount = invoice.get("amount") or invoice.get("total_price")
-                        if not amount and extracted_data and isinstance(extracted_data, dict):
-                            totals = extracted_data.get("totals", {})
-                            amount = totals.get("grand_total") or totals.get("amount_due")
-                        
-                        # Also check simple structure
-                        if not amount and extracted_data and isinstance(extracted_data, dict):
+                        # Get amount - prioritize extracted_data.total_price (simplified schema)
+                        amount = None
+                        if extracted_data and isinstance(extracted_data, dict):
+                            # First check the simplified schema structure
                             amount = extracted_data.get("total_price")
+                            # If not found, check old detailed schema
+                            if not amount:
+                                totals = extracted_data.get("totals", {})
+                                amount = totals.get("grand_total") or totals.get("amount_due")
+                        
+                        # Fallback to invoice-level fields
+                        if not amount:
+                            amount = invoice.get("total_price") or invoice.get("amount")
                         
                         if amount:
-                            monthly_expenses[month_key] += float(amount) if amount else 0
+                            try:
+                                amount_float = float(amount) if amount else 0
+                                monthly_expenses[month_key] += amount_float
+                                print(f"Invoice {invoice.get('id')}: Added {amount_float} to month {month_key}")
+                            except (ValueError, TypeError) as e:
+                                print(f"Error converting amount {amount} to float: {e}")
+                        else:
+                            print(f"Invoice {invoice.get('id')}: No amount found, extracted_data keys: {list(extracted_data.keys()) if isinstance(extracted_data, dict) else 'not a dict'}")
                     except (ValueError, TypeError, AttributeError) as e:
                         print(f"Error parsing invoice date {invoice_date}: {e}")
                         continue
