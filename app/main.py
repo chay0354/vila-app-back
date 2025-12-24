@@ -851,6 +851,103 @@ def api_reports_summary():
     """Alias for /reports/summary to match frontend expectations"""
     return reports_summary()
 
+@app.get("/api/reports/monthly-income-expenses")
+def monthly_income_expenses():
+    """
+    Get monthly breakdown of income (from orders) and expenses (from invoices)
+    Returns data grouped by month in format: YYYY-MM
+    """
+    from collections import defaultdict
+    from datetime import datetime
+    
+    try:
+        # Get all orders with their dates and amounts
+        orders_resp = requests.get(
+            f"{REST_URL}/orders", 
+            headers=SERVICE_HEADERS, 
+            params={"select": "total_amount,paid_amount,arrival_date"}
+        )
+        orders_resp.raise_for_status()
+        orders = orders_resp.json() or []
+        
+        # Get all invoices with their dates and amounts
+        invoices_resp = requests.get(
+            f"{REST_URL}/invoices",
+            headers=SERVICE_HEADERS,
+            params={"select": "amount,issued_at,date,total_price,extracted_data"}
+        )
+        invoices_resp.raise_for_status()
+        invoices = invoices_resp.json() or []
+        
+        # Group income by month from orders
+        monthly_income = defaultdict(float)
+        for order in orders:
+            arrival_date = order.get("arrival_date")
+            if arrival_date:
+                try:
+                    # Parse date and get YYYY-MM format
+                    if isinstance(arrival_date, str):
+                        date_obj = datetime.strptime(arrival_date.split('T')[0], "%Y-%m-%d")
+                    else:
+                        date_obj = arrival_date
+                    month_key = date_obj.strftime("%Y-%m")
+                    # Use paid_amount if available, otherwise total_amount
+                    amount = order.get("paid_amount") or order.get("total_amount") or 0
+                    monthly_income[month_key] += float(amount) if amount else 0
+                except (ValueError, TypeError, AttributeError) as e:
+                    print(f"Error parsing order date {arrival_date}: {e}")
+                    continue
+        
+        # Group expenses by month from invoices
+        monthly_expenses = defaultdict(float)
+        for invoice in invoices:
+            # Try to get date from different fields
+            invoice_date = invoice.get("issued_at") or invoice.get("date")
+            if not invoice_date:
+                # Try to get from extracted_data
+                extracted_data = invoice.get("extracted_data")
+                if isinstance(extracted_data, dict):
+                    invoice_info = extracted_data.get("invoice", {})
+                    invoice_date = invoice_info.get("invoice_date")
+            
+            if invoice_date:
+                try:
+                    # Parse date and get YYYY-MM format
+                    if isinstance(invoice_date, str):
+                        date_obj = datetime.strptime(invoice_date.split('T')[0], "%Y-%m-%d")
+                    else:
+                        date_obj = invoice_date
+                    month_key = date_obj.strftime("%Y-%m")
+                    # Get amount from different possible fields
+                    amount = invoice.get("amount") or invoice.get("total_price")
+                    if not amount and isinstance(extracted_data, dict):
+                        totals = extracted_data.get("totals", {})
+                        amount = totals.get("grand_total") or totals.get("amount_due")
+                    monthly_expenses[month_key] += float(amount) if amount else 0
+                except (ValueError, TypeError, AttributeError) as e:
+                    print(f"Error parsing invoice date {invoice_date}: {e}")
+                    continue
+        
+        # Combine all months and create sorted list
+        all_months = set(list(monthly_income.keys()) + list(monthly_expenses.keys()))
+        monthly_data = []
+        for month in sorted(all_months, reverse=True):  # Most recent first
+            monthly_data.append({
+                "month": month,
+                "income": monthly_income.get(month, 0),
+                "expenses": monthly_expenses.get(month, 0),
+                "net": monthly_income.get(month, 0) - monthly_expenses.get(month, 0)
+            })
+        
+        return {
+            "monthly_data": monthly_data,
+            "total_income": sum(monthly_income.values()),
+            "total_expenses": sum(monthly_expenses.values()),
+            "total_net": sum(monthly_income.values()) - sum(monthly_expenses.values())
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching monthly income/expenses: {str(e)}")
+
 @app.get("/invoices")
 def invoices():
     """Get all invoices - maps to actual table schema: id, vendor, invoice_number, amount, payment_method, issued_at, file_url"""
