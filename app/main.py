@@ -866,18 +866,34 @@ def invoices():
         # Map database columns to frontend format
         mapped_invoices = []
         for inv in invoices:
-            mapped = {
-                "id": str(inv.get("id", "")),
-                "image_data": inv.get("file_url", ""),  # Map file_url to image_data
-                "total_price": inv.get("amount"),  # Map amount to total_price
-                "currency": "ILS",  # Default since not in table
-                "vendor": inv.get("vendor"),
-                "date": inv.get("issued_at"),  # Map issued_at to date
-                "invoice_number": inv.get("invoice_number"),
-                "extracted_data": None,  # Not stored in table
-                "created_at": inv.get("issued_at"),  # Use issued_at as created_at
-                "updated_at": inv.get("issued_at"),
-            }
+            # Check if we have the new structure with extracted_data
+            if inv.get("extracted_data"):
+                mapped = {
+                    "id": str(inv.get("id", "")),
+                    "image_data": inv.get("image_data") or inv.get("file_url", ""),
+                    "total_price": inv.get("total_price") or inv.get("amount"),
+                    "currency": inv.get("currency", "ILS"),
+                    "vendor": inv.get("vendor"),
+                    "date": inv.get("date") or inv.get("issued_at"),
+                    "invoice_number": inv.get("invoice_number"),
+                    "extracted_data": inv.get("extracted_data"),  # Full structured data
+                    "created_at": inv.get("created_at") or inv.get("issued_at"),
+                    "updated_at": inv.get("updated_at") or inv.get("issued_at"),
+                }
+            else:
+                # Legacy format - map old structure
+                mapped = {
+                    "id": str(inv.get("id", "")),
+                    "image_data": inv.get("file_url", "") or inv.get("image_data", ""),
+                    "total_price": inv.get("amount") or inv.get("total_price"),
+                    "currency": inv.get("currency", "ILS"),
+                    "vendor": inv.get("vendor"),
+                    "date": inv.get("issued_at") or inv.get("date"),
+                    "invoice_number": inv.get("invoice_number"),
+                    "extracted_data": None,
+                    "created_at": inv.get("created_at") or inv.get("issued_at"),
+                    "updated_at": inv.get("updated_at") or inv.get("issued_at"),
+                }
             mapped_invoices.append(mapped)
         return mapped_invoices
     except requests.exceptions.HTTPError as e:
@@ -895,18 +911,33 @@ def invoices():
                 # Map database columns to frontend format
                 mapped_invoices = []
                 for inv in invoices:
-                    mapped = {
-                        "id": str(inv.get("id", "")),
-                        "image_data": inv.get("file_url", ""),
-                        "total_price": inv.get("amount"),
-                        "currency": "ILS",
-                        "vendor": inv.get("vendor"),
-                        "date": inv.get("issued_at"),
-                        "invoice_number": inv.get("invoice_number"),
-                        "extracted_data": None,
-                        "created_at": inv.get("issued_at"),
-                        "updated_at": inv.get("issued_at"),
-                    }
+                    # Check if we have the new structure with extracted_data
+                    if inv.get("extracted_data"):
+                        mapped = {
+                            "id": str(inv.get("id", "")),
+                            "image_data": inv.get("image_data") or inv.get("file_url", ""),
+                            "total_price": inv.get("total_price") or inv.get("amount"),
+                            "currency": inv.get("currency", "ILS"),
+                            "vendor": inv.get("vendor"),
+                            "date": inv.get("date") or inv.get("issued_at"),
+                            "invoice_number": inv.get("invoice_number"),
+                            "extracted_data": inv.get("extracted_data"),
+                            "created_at": inv.get("created_at") or inv.get("issued_at"),
+                            "updated_at": inv.get("updated_at") or inv.get("issued_at"),
+                        }
+                    else:
+                        mapped = {
+                            "id": str(inv.get("id", "")),
+                            "image_data": inv.get("file_url", "") or inv.get("image_data", ""),
+                            "total_price": inv.get("amount") or inv.get("total_price"),
+                            "currency": inv.get("currency", "ILS"),
+                            "vendor": inv.get("vendor"),
+                            "date": inv.get("issued_at") or inv.get("date"),
+                            "invoice_number": inv.get("invoice_number"),
+                            "extracted_data": None,
+                            "created_at": inv.get("created_at") or inv.get("issued_at"),
+                            "updated_at": inv.get("updated_at") or inv.get("issued_at"),
+                        }
                     mapped_invoices.append(mapped)
                 return mapped_invoices
             except:
@@ -976,75 +1007,51 @@ async def process_invoice(request: Request):
         # Initialize OpenAI client
         client = OpenAI(api_key=openai_key)
         
-        # Initialize default invoice data (empty fields) - will be used if OpenAI fails
+        # Initialize simple invoice data structure - only 2 fields
         invoice_data = {
             "total_price": None,
-            "currency": "ILS",
-            "items": [],
-            "vendor": None,
-            "date": None,
-            "invoice_number": None
+            "product_description": None
         }
         
-        # Try to call OpenAI Vision API
+        # Try to call OpenAI Responses API with GPT-5.2
         try:
-            response = client.chat.completions.create(
-                model="gpt-5.1",
-            messages=[
-                {
-                    "role": "system",
-                    "content": """You are an expert at extracting invoice data from images. 
+            response = client.responses.create(
+                model="gpt-5.2",
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": """Extract invoice data from this image and return it as a JSON object with only 2 fields.
 
 CRITICAL: You MUST respond with ONLY valid JSON. No markdown, no code blocks, no explanations, no text before or after the JSON. Just the raw JSON object.
 
 The JSON structure MUST be exactly:
 {
-    "total_price": <number or null>,
-    "currency": "<string or null>",
-    "items": [
-        {
-            "name": "<string>",
-            "quantity": <number>,
-            "unit_price": <number>,
-            "total_price": <number>
-        }
-    ],
-    "vendor": "<string or null>",
-    "date": "<string or null>",
-    "invoice_number": "<string or null>"
+  "total_price": <number or null>,
+  "product_description": "<string or null>"
 }
 
 Rules:
+- total_price: Extract the final total amount to pay from the invoice (look for "Total", "סה\"כ", "Amount Due", etc.). Must be a number or null.
+- product_description: Extract a description of what products/services are on the invoice. This should be a summary of the main items or services. Must be a string or null.
 - If a field is not found, use null (not empty string, not 0, use null)
-- total_price must be a number or null
-- currency must be a string like "ILS", "USD", "EUR" or null
-- items must be an array (can be empty [])
-- Each item must have name (string), quantity (number), unit_price (number), total_price (number)
-- vendor, date, invoice_number must be strings or null
+- Be thorough and extract all available information
 
 Return ONLY the JSON object, nothing else."""
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{image_mime};base64,{image_base64}"
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": f"data:{image_mime};base64,{image_base64}"
                             }
-                        },
-                        {
-                            "type": "text",
-                            "text": "Extract invoice data from this image. Return ONLY valid JSON with no markdown, no code blocks, no explanations. Just the raw JSON object starting with { and ending with }."
-                        }
-                    ]
-                }
-            ],
-                max_tokens=2000
+                        ]
+                    }
+                ]
             )
             
-            # Parse the response
-            content = response.choices[0].message.content if response.choices and response.choices[0].message.content else ""
+            # Parse the response - Responses API returns output_text
+            content = response.output_text if hasattr(response, 'output_text') else ""
             
             # Try to extract and parse JSON from the response
             if content:
@@ -1071,29 +1078,17 @@ Return ONLY the JSON object, nothing else."""
                     # Try to parse the JSON
                     parsed_data = json.loads(json_content)
                     
-                    # Validate and merge parsed data with defaults
+                    # Validate and merge parsed data with defaults - simple 2 field structure
                     if isinstance(parsed_data, dict):
-                        # Ensure all required fields exist with proper types
-                        if "total_price" in parsed_data and parsed_data["total_price"] is not None:
+                        if "total_price" in parsed_data:
                             try:
-                                invoice_data["total_price"] = float(parsed_data["total_price"])
+                                invoice_data["total_price"] = float(parsed_data["total_price"]) if parsed_data["total_price"] is not None else None
                             except (ValueError, TypeError):
                                 invoice_data["total_price"] = None
                         
-                        if "currency" in parsed_data:
-                            invoice_data["currency"] = str(parsed_data["currency"]) if parsed_data["currency"] else "ILS"
+                        if "product_description" in parsed_data:
+                            invoice_data["product_description"] = str(parsed_data["product_description"]) if parsed_data["product_description"] else None
                         
-                        if "items" in parsed_data and isinstance(parsed_data["items"], list):
-                            invoice_data["items"] = parsed_data["items"]
-                        
-                        if "vendor" in parsed_data:
-                            invoice_data["vendor"] = str(parsed_data["vendor"]) if parsed_data["vendor"] else None
-                        
-                        if "date" in parsed_data:
-                            invoice_data["date"] = str(parsed_data["date"]) if parsed_data["date"] else None
-                        
-                        if "invoice_number" in parsed_data:
-                            invoice_data["invoice_number"] = str(parsed_data["invoice_number"]) if parsed_data["invoice_number"] else None
                 except (json.JSONDecodeError, AttributeError, KeyError, ValueError, TypeError) as parse_error:
                     # If parsing fails, log the error but continue with empty fields
                     print(f"Warning: Could not parse OpenAI response: {parse_error}")
@@ -1105,23 +1100,45 @@ Return ONLY the JSON object, nothing else."""
             print("Saving invoice with empty fields - user can edit manually")
             # Continue with empty invoice_data - user can edit manually
         
-        # Save to database - map to actual table schema: id (int8 auto), vendor, invoice_number, amount, payment_method, issued_at, file_url
+        # Save to database - simple 2 field structure
         invoice_record = {
-            # Don't send id - let Supabase auto-generate as int8
-            "file_url": image_data_uri,  # Map image_data to file_url
-            "amount": invoice_data.get("total_price"),  # Map total_price to amount
-            "vendor": invoice_data.get("vendor"),
-            "invoice_number": invoice_data.get("invoice_number"),
-            "issued_at": invoice_data.get("date"),  # Map date to issued_at
-            "payment_method": None  # Not extracted, can be null
+            "image_data": image_data_uri,
+            "total_price": invoice_data.get("total_price"),
+            "currency": "ILS",  # Default currency
+            "vendor": None,
+            "date": None,
+            "invoice_number": None,
+            "extracted_data": invoice_data  # Store the simple structured data
+        }
+        
+        # Fallback record for old table structure if needed
+        invoice_record_fallback = {
+            "file_url": image_data_uri,
+            "amount": invoice_data.get("total_price"),
+            "vendor": None,
+            "invoice_number": None,
+            "issued_at": None,
+            "payment_method": None
         }
         
         try:
+            # Try to save with new structure first
             resp = requests.post(
                 f"{REST_URL}/invoices",
                 headers=SERVICE_HEADERS,
                 json=invoice_record
             )
+            
+            # If that fails, try fallback structure
+            if resp.status_code not in [200, 201]:
+                try:
+                    resp = requests.post(
+                        f"{REST_URL}/invoices",
+                        headers=SERVICE_HEADERS,
+                        json=invoice_record_fallback
+                    )
+                except:
+                    pass
             # Check if save was successful
             if resp.status_code == 201 or resp.status_code == 200:
                 saved_invoice = resp.json()
