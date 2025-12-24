@@ -862,22 +862,17 @@ def monthly_income_expenses():
     
     try:
         # Get all orders with their dates and amounts
-        orders_resp = requests.get(
-            f"{REST_URL}/orders", 
-            headers=SERVICE_HEADERS, 
-            params={"select": "total_amount,paid_amount,arrival_date"}
-        )
-        orders_resp.raise_for_status()
-        orders = orders_resp.json() or []
-        
-        # Get all invoices with their dates and amounts
-        invoices_resp = requests.get(
-            f"{REST_URL}/invoices",
-            headers=SERVICE_HEADERS,
-            params={"select": "amount,issued_at,date,total_price,extracted_data"}
-        )
-        invoices_resp.raise_for_status()
-        invoices = invoices_resp.json() or []
+        try:
+            orders_resp = requests.get(
+                f"{REST_URL}/orders", 
+                headers=SERVICE_HEADERS, 
+                params={"select": "total_amount,paid_amount,arrival_date"}
+            )
+            orders_resp.raise_for_status()
+            orders = orders_resp.json() or []
+        except Exception as e:
+            print(f"Warning: Could not fetch orders: {e}")
+            orders = []
         
         # Group income by month from orders
         monthly_income = defaultdict(float)
@@ -898,35 +893,76 @@ def monthly_income_expenses():
                     print(f"Error parsing order date {arrival_date}: {e}")
                     continue
         
-        # Group expenses by month from invoices
+        # Get all invoices with their dates and amounts
         monthly_expenses = defaultdict(float)
+        try:
+            invoices_resp = requests.get(
+                f"{REST_URL}/invoices",
+                headers=SERVICE_HEADERS,
+                params={"select": "*"}
+            )
+            invoices_resp.raise_for_status()
+            invoices = invoices_resp.json() or []
+        except Exception as e:
+            print(f"Warning: Could not fetch invoices (table might not exist): {e}")
+            invoices = []
+        
+        # Group expenses by month from invoices
         for invoice in invoices:
-            # Try to get date from different fields
-            invoice_date = invoice.get("issued_at") or invoice.get("date")
-            if not invoice_date:
-                # Try to get from extracted_data
+            try:
+                # Try to get date from different fields
+                invoice_date = invoice.get("issued_at") or invoice.get("date")
                 extracted_data = invoice.get("extracted_data")
-                if isinstance(extracted_data, dict):
+                
+                # Parse extracted_data if it's a string
+                if isinstance(extracted_data, str):
+                    try:
+                        import json
+                        extracted_data = json.loads(extracted_data)
+                    except:
+                        extracted_data = None
+                
+                if not invoice_date and extracted_data and isinstance(extracted_data, dict):
                     invoice_info = extracted_data.get("invoice", {})
                     invoice_date = invoice_info.get("invoice_date")
-            
-            if invoice_date:
-                try:
-                    # Parse date and get YYYY-MM format
-                    if isinstance(invoice_date, str):
-                        date_obj = datetime.strptime(invoice_date.split('T')[0], "%Y-%m-%d")
-                    else:
-                        date_obj = invoice_date
-                    month_key = date_obj.strftime("%Y-%m")
-                    # Get amount from different possible fields
-                    amount = invoice.get("amount") or invoice.get("total_price")
-                    if not amount and isinstance(extracted_data, dict):
-                        totals = extracted_data.get("totals", {})
-                        amount = totals.get("grand_total") or totals.get("amount_due")
-                    monthly_expenses[month_key] += float(amount) if amount else 0
-                except (ValueError, TypeError, AttributeError) as e:
-                    print(f"Error parsing invoice date {invoice_date}: {e}")
-                    continue
+                
+                # If still no date, use created_at or current month as fallback
+                if not invoice_date:
+                    invoice_date = invoice.get("created_at")
+                
+                if invoice_date:
+                    try:
+                        # Parse date and get YYYY-MM format
+                        if isinstance(invoice_date, str):
+                            # Handle different date formats
+                            date_str = invoice_date.split('T')[0].split(' ')[0]
+                            try:
+                                date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+                            except ValueError:
+                                # Try other formats or use current date
+                                date_obj = datetime.now()
+                        else:
+                            date_obj = invoice_date
+                        month_key = date_obj.strftime("%Y-%m")
+                        
+                        # Get amount from different possible fields
+                        amount = invoice.get("amount") or invoice.get("total_price")
+                        if not amount and extracted_data and isinstance(extracted_data, dict):
+                            totals = extracted_data.get("totals", {})
+                            amount = totals.get("grand_total") or totals.get("amount_due")
+                        
+                        # Also check simple structure
+                        if not amount and extracted_data and isinstance(extracted_data, dict):
+                            amount = extracted_data.get("total_price")
+                        
+                        if amount:
+                            monthly_expenses[month_key] += float(amount) if amount else 0
+                    except (ValueError, TypeError, AttributeError) as e:
+                        print(f"Error parsing invoice date {invoice_date}: {e}")
+                        continue
+            except Exception as e:
+                print(f"Error processing invoice: {e}")
+                continue
         
         # Combine all months and create sorted list
         all_months = set(list(monthly_income.keys()) + list(monthly_expenses.keys()))
