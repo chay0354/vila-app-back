@@ -395,13 +395,28 @@ def create_inspection(payload: dict):
         }
         
         # Check if inspection exists
-        check_resp = requests.get(
-            f"{REST_URL}/inspections",
-            headers=SERVICE_HEADERS,
-            params={"id": f"eq.{inspection_id}", "select": "id"}
-        )
-        check_resp.raise_for_status()
-        existing = check_resp.json()
+        existing = []
+        try:
+            check_resp = requests.get(
+                f"{REST_URL}/inspections",
+                headers=SERVICE_HEADERS,
+                params={"id": f"eq.{inspection_id}", "select": "id"}
+            )
+            # If table doesn't exist (404), that's OK - we'll create it
+            if check_resp.status_code == 404:
+                existing = []
+            else:
+                check_resp.raise_for_status()
+                existing = check_resp.json() or []
+        except requests.exceptions.HTTPError as e:
+            # If table doesn't exist, that's OK
+            if e.response and e.response.status_code == 404:
+                existing = []
+            else:
+                raise
+        except Exception:
+            # If any other error, assume inspection doesn't exist
+            existing = []
         
         if existing and len(existing) > 0:
             # Update existing inspection
