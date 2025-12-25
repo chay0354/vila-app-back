@@ -647,33 +647,39 @@ def create_inspection(payload: dict):
             # Only delete tasks that are no longer in the list (cleanup)
             # But only if we successfully saved the new tasks
             # IMPORTANT: Only delete if we saved ALL tasks successfully
+            # Also, only delete tasks for THIS specific inspection_id
             if saved_tasks and len(saved_tasks) == len(tasks) and len(failed_tasks) == 0:
                 try:
                     saved_task_ids = {t["id"] for t in saved_tasks}
-                    # Delete tasks that exist in DB but are not in the new list
+                    # Delete tasks that exist in DB for THIS inspection but are not in the new list
                     if existing_task_ids:
                         tasks_to_delete = existing_task_ids - saved_task_ids
                         if tasks_to_delete:
-                            print(f"Cleaning up {len(tasks_to_delete)} orphaned tasks for inspection {inspection_id}")
+                            print(f"Cleaning up {len(tasks_to_delete)} orphaned tasks for inspection {inspection_id}: {tasks_to_delete}")
                             for task_id_to_delete in tasks_to_delete:
                                 try:
+                                    # CRITICAL: Filter by BOTH id AND inspection_id to ensure we only delete tasks for this inspection
                                     delete_resp = requests.delete(
                                         f"{REST_URL}/inspection_tasks?id=eq.{task_id_to_delete}&inspection_id=eq.{inspection_id}",
                                         headers=SERVICE_HEADERS
                                     )
                                     if delete_resp.status_code in [200, 204]:
-                                        print(f"  ✓ Deleted orphaned task {task_id_to_delete}")
+                                        print(f"  ✓ Deleted orphaned task {task_id_to_delete} for inspection {inspection_id}")
                                     else:
-                                        print(f"  ⚠ Failed to delete task {task_id_to_delete}: {delete_resp.status_code}")
+                                        print(f"  ⚠ Failed to delete task {task_id_to_delete} for inspection {inspection_id}: {delete_resp.status_code}")
                                 except Exception as e:
-                                    print(f"  ✗ Error deleting task {task_id_to_delete}: {str(e)}")
+                                    print(f"  ✗ Error deleting task {task_id_to_delete} for inspection {inspection_id}: {str(e)}")
+                        else:
+                            print(f"No orphaned tasks to clean up for inspection {inspection_id}")
+                    else:
+                        print(f"No existing tasks found for inspection {inspection_id}, skipping cleanup")
                 except Exception as e:
-                    print(f"Error during cleanup: {str(e)}")
+                    print(f"Error during cleanup for inspection {inspection_id}: {str(e)}")
             else:
                 if len(failed_tasks) > 0:
-                    print(f"Skipping cleanup - {len(failed_tasks)} tasks failed to save")
+                    print(f"Skipping cleanup for inspection {inspection_id} - {len(failed_tasks)} tasks failed to save")
                 elif len(saved_tasks) < len(tasks):
-                    print(f"Skipping cleanup - only {len(saved_tasks)}/{len(tasks)} tasks saved")
+                    print(f"Skipping cleanup for inspection {inspection_id} - only {len(saved_tasks)}/{len(tasks)} tasks saved")
             
             # Log summary
             print(f"Inspection {inspection_id}: Saved {len(saved_tasks)}/{len(tasks)} tasks. Failed: {len(failed_tasks)}")
