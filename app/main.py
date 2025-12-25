@@ -339,14 +339,28 @@ def inspections():
         if inspection_ids:
             # Get all tasks for these inspections
             # Supabase PostgREST IN query format: in.(value1,value2,value3)
-            inspection_ids_str = ','.join(inspection_ids)
-            tasks_resp = requests.get(
-                f"{REST_URL}/inspection_tasks",
-                headers=SERVICE_HEADERS,
-                params={"inspection_id": f"in.({inspection_ids_str})", "select": "*"}
-            )
-            tasks_resp.raise_for_status()
-            all_tasks = tasks_resp.json() or []
+            try:
+                inspection_ids_str = ','.join(inspection_ids)
+                tasks_resp = requests.get(
+                    f"{REST_URL}/inspection_tasks",
+                    headers=SERVICE_HEADERS,
+                    params={"inspection_id": f"in.({inspection_ids_str})", "select": "*"}
+                )
+                # If table doesn't exist (404), that's OK - return empty tasks
+                if tasks_resp.status_code == 404:
+                    all_tasks = []
+                else:
+                    tasks_resp.raise_for_status()
+                    all_tasks = tasks_resp.json() or []
+            except requests.exceptions.HTTPError as e:
+                # If table doesn't exist, return empty tasks
+                if e.response and e.response.status_code == 404:
+                    all_tasks = []
+                else:
+                    raise
+            except Exception:
+                # Any other error, return empty tasks
+                all_tasks = []
             
             # Group tasks by inspection_id
             for task in all_tasks:
