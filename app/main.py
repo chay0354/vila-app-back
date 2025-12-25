@@ -420,23 +420,42 @@ def create_inspection(payload: dict):
         
         if existing and len(existing) > 0:
             # Update existing inspection
-            update_resp = requests.patch(
-                f"{REST_URL}/inspections?id=eq.{inspection_id}",
-                headers={**SERVICE_HEADERS, "Prefer": "return=representation"},
-                json=inspection_data
-            )
-            update_resp.raise_for_status()
+            try:
+                update_resp = requests.patch(
+                    f"{REST_URL}/inspections?id=eq.{inspection_id}",
+                    headers={**SERVICE_HEADERS, "Prefer": "return=representation"},
+                    json=inspection_data
+                )
+                # If table doesn't exist (404), that's OK - will be created by migration
+                if update_resp.status_code != 404:
+                    update_resp.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                # If table doesn't exist, that's OK
+                if e.response and e.response.status_code == 404:
+                    pass
+                else:
+                    raise
         else:
             # Create new inspection
-            create_resp = requests.post(
-                f"{REST_URL}/inspections",
-                headers=SERVICE_HEADERS,
-                json=inspection_data
-            )
-            # Don't fail if inspection already exists (might happen in race conditions)
-            if create_resp.status_code not in [200, 201]:
-                # Try to continue anyway - inspection might already exist
-                pass
+            try:
+                create_resp = requests.post(
+                    f"{REST_URL}/inspections",
+                    headers=SERVICE_HEADERS,
+                    json=inspection_data
+                )
+                # If table doesn't exist (404), that's OK - will be created by migration
+                # If inspection already exists (409 or similar), that's also OK
+                if create_resp.status_code not in [200, 201, 404, 409]:
+                    create_resp.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                # If table doesn't exist (404), that's OK
+                if e.response and e.response.status_code == 404:
+                    pass
+                # If conflict (409), inspection might already exist - that's OK
+                elif e.response and e.response.status_code == 409:
+                    pass
+                else:
+                    raise
         
         # Handle tasks
         tasks = payload.get("tasks", [])
