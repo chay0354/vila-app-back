@@ -367,6 +367,7 @@ def inspections():
             
             # Group tasks by inspection_id
             print(f"Loaded {len(all_tasks)} tasks from database")
+            print(f"Tasks for inspections: {inspection_ids}")
             for task in all_tasks:
                 insp_id = task.get("inspection_id")
                 if insp_id:
@@ -386,8 +387,14 @@ def inspections():
                         "name": task.get("name"),
                         "completed": completed,
                     }
-                    print(f"Task {task_data['id']} ({task_data['name']}): completed={completed} (type: {type(completed)})")
+                    print(f"Task {task_data['id']} for inspection {insp_id} ({task_data['name']}): completed={completed}")
                     tasks_by_inspection[insp_id].append(task_data)
+            
+            # Log summary per inspection
+            for insp_id in inspection_ids:
+                task_count = len(tasks_by_inspection.get(insp_id, []))
+                completed_count = sum(1 for t in tasks_by_inspection.get(insp_id, []) if t.get("completed", False))
+                print(f"Inspection {insp_id}: {completed_count}/{task_count} tasks completed")
         
         # Combine inspections with their tasks
         result = []
