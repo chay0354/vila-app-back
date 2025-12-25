@@ -2426,16 +2426,43 @@ def create_cleaning_schedule_entry(payload: dict):
         if not data.get("date") or not data.get("start_time") or not data.get("end_time") or not data.get("cleaner_name"):
             raise HTTPException(status_code=400, detail="date, start_time, end_time, and cleaner_name are required")
         
+        # Ensure data types are correct - Supabase expects date and time as strings in ISO format
+        # Remove any extra fields that might cause issues
+        clean_data = {
+            "id": data.get("id"),
+            "date": str(data.get("date")),  # Ensure it's a string
+            "start_time": str(data.get("start_time")),  # Ensure it's a string
+            "end_time": str(data.get("end_time")),  # Ensure it's a string
+            "cleaner_name": str(data.get("cleaner_name")).strip(),  # Ensure it's a string and trimmed
+        }
+        
         resp = requests.post(
             f"{REST_URL}/cleaning_schedule",
             headers=SERVICE_HEADERS,
-            json=data
+            json=clean_data
         )
+        
+        # Handle 400 errors specifically to provide better error messages
+        if resp.status_code == 400:
+            error_text = resp.text[:500] if resp.text else "Bad Request"
+            try:
+                error_json = resp.json()
+                if isinstance(error_json, dict) and "message" in error_json:
+                    error_text = error_json["message"]
+                elif isinstance(error_json, dict) and "detail" in error_json:
+                    error_text = error_json["detail"]
+            except:
+                pass
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid request data: {error_text}. Please check that date, start_time, end_time, and cleaner_name are provided correctly."
+            )
+        
         resp.raise_for_status()
         if resp.text:
             body = resp.json()
             return body[0] if isinstance(body, list) and body else body
-        return data
+        return clean_data
     except HTTPException:
         raise
     except requests.exceptions.HTTPError as e:
@@ -2445,6 +2472,9 @@ def create_cleaning_schedule_entry(payload: dict):
                 status_code=404, 
                 detail="Cleaning schedule table does not exist. Please create the table in Supabase first."
             )
+        # Re-raise 400 errors that we already handled
+        if e.response and e.response.status_code == 400:
+            raise
         error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
         raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
     except Exception as e:
