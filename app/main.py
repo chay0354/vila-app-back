@@ -584,12 +584,30 @@ def create_inspection(payload: dict):
                         "completed": bool(task.get("completed", False)),
                     })
             
+            # Only delete tasks that are no longer in the list (cleanup)
+            # But only if we successfully saved the new tasks
+            if saved_tasks and len(saved_tasks) > 0:
+                try:
+                    saved_task_ids = {t["id"] for t in saved_tasks}
+                    # Delete tasks that exist in DB but are not in the new list
+                    if existing_task_ids:
+                        tasks_to_delete = existing_task_ids - saved_task_ids
+                        for task_id_to_delete in tasks_to_delete:
+                            try:
+                                requests.delete(
+                                    f"{REST_URL}/inspection_tasks?id=eq.{task_id_to_delete}&inspection_id=eq.{inspection_id}",
+                                    headers=SERVICE_HEADERS
+                                )
+                            except:
+                                pass  # Ignore delete errors
+                except:
+                    pass  # Ignore cleanup errors
+            
             # Log summary
             print(f"Inspection {inspection_id}: Saved {len(saved_tasks)}/{len(tasks)} tasks. Failed: {len(failed_tasks)}")
-        
-        # Return tasks that were saved (or attempted to be saved)
-        if saved_tasks:
-            return_tasks = saved_tasks
+            if saved_tasks:
+                return_tasks = saved_tasks
+            # If all tasks failed, keep the original tasks in the response (don't lose them)
         
         # Return the created/updated inspection with tasks
         # Include metadata about save success
