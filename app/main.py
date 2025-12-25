@@ -558,6 +558,8 @@ def create_inspection(payload: dict):
                             elif task_resp.status_code == 404:
                                 saved_tasks.append(task_data)  # Table doesn't exist, but include in response
                             else:
+                                error_text = task_resp.text[:200] if task_resp.text else ""
+                                print(f"ERROR: Failed to insert task {task_id} after update failed: {task_resp.status_code} {error_text}")
                                 failed_tasks.append(task_data)
                     else:
                         # Task doesn't exist, insert it
@@ -586,7 +588,8 @@ def create_inspection(payload: dict):
                                 failed_tasks.append(task_data)
                         else:
                             error_text = task_resp.text[:200] if task_resp.text else ""
-                            print(f"Warning: Failed to save task {task_id}: {task_resp.status_code} {error_text}")
+                            print(f"ERROR: Failed to insert task {task_id}: {task_resp.status_code} {error_text}")
+                            print(f"  Task data: {task_data}")
                             failed_tasks.append(task_data)
                 except requests.exceptions.HTTPError as e:
                     # If table doesn't exist (404), that's OK
