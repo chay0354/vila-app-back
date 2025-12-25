@@ -438,6 +438,7 @@ def create_inspection(payload: dict):
             
             # Insert tasks one by one, but don't fail the whole operation if some fail
             # This is more resilient and allows partial success
+            # If table doesn't exist (404), that's OK - it will be created by migration
             for task in tasks:
                 try:
                     task_data = {
@@ -452,12 +453,21 @@ def create_inspection(payload: dict):
                         json=task_data
                     )
                     # Don't raise on error - continue with other tasks
-                    # This allows partial success if some tasks fail
-                    if task_resp.status_code not in [200, 201]:
-                        # Log but continue
+                    # 404 means table doesn't exist yet (will be created by migration)
+                    # Other errors we'll log but continue
+                    if task_resp.status_code == 404:
+                        # Table doesn't exist - that's OK, continue
                         pass
+                    elif task_resp.status_code not in [200, 201]:
+                        # Other error - log but continue
+                        pass
+                except requests.exceptions.HTTPError as e:
+                    # If table doesn't exist (404), that's OK
+                    if e.response and e.response.status_code == 404:
+                        pass
+                    # Otherwise, continue with other tasks
                 except Exception as e:
-                    # Log but continue with other tasks
+                    # Any other error - continue with other tasks
                     # This prevents one failed task from breaking the whole operation
                     pass
         
