@@ -640,9 +640,17 @@ def create_inspection(payload: dict):
             
             # Log summary
             print(f"Inspection {inspection_id}: Saved {len(saved_tasks)}/{len(tasks)} tasks. Failed: {len(failed_tasks)}")
+            if failed_tasks:
+                print(f"WARNING: {len(failed_tasks)} tasks failed to save:")
+                for failed_task in failed_tasks[:5]:  # Show first 5 failed tasks
+                    print(f"  - Task {failed_task.get('id')} ({failed_task.get('name')})")
+            
             if saved_tasks:
                 return_tasks = saved_tasks
-            # If all tasks failed, keep the original tasks in the response (don't lose them)
+            else:
+                # If all tasks failed, log error but still return original tasks
+                print(f"ERROR: All {len(tasks)} tasks failed to save for inspection {inspection_id}!")
+                return_tasks = tasks  # Return original tasks so frontend doesn't lose them
         
         # Return the created/updated inspection with tasks
         # Include metadata about save success
