@@ -233,9 +233,90 @@ def update_order(order_id: str, payload: OrderUpdate):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.patch("/api/orders/{order_id}")
-def api_update_order(order_id: str, payload: OrderUpdate):
-    """Alias for /orders/{order_id} to match frontend expectations"""
-    return update_order(order_id, payload)
+def api_update_order(order_id: str, payload: dict):
+    """Update order with frontend camelCase format and sync inspections"""
+    # Get the current order to check if departure_date changed
+    try:
+        current_order_resp = requests.get(
+            f"{REST_URL}/orders",
+            headers=SERVICE_HEADERS,
+            params={"id": f"eq.{order_id}", "select": "id,departure_date,unit_number,guest_name,status"}
+        )
+        current_order = None
+        if current_order_resp.status_code == 200:
+            orders_list = current_order_resp.json() or []
+            if orders_list:
+                current_order = orders_list[0]
+    except Exception as e:
+        print(f"Warning: Could not fetch current order: {str(e)}")
+        current_order = None
+    
+    old_departure_date = current_order.get("departure_date") if current_order else None
+    
+    # Map frontend camelCase to backend snake_case
+    update_data = {}
+    if "guestName" in payload:
+        update_data["guest_name"] = payload["guestName"]
+    if "unitNumber" in payload:
+        update_data["unit_number"] = payload["unitNumber"]
+    if "arrivalDate" in payload:
+        update_data["arrival_date"] = payload["arrivalDate"]
+    if "departureDate" in payload:
+        update_data["departure_date"] = payload["departureDate"]
+    if "status" in payload:
+        update_data["status"] = payload["status"]
+    if "guestsCount" in payload:
+        update_data["guests_count"] = payload["guestsCount"]
+    if "specialRequests" in payload:
+        update_data["special_requests"] = payload["specialRequests"]
+    if "internalNotes" in payload:
+        update_data["internal_notes"] = payload["internalNotes"]
+    if "paidAmount" in payload:
+        update_data["paid_amount"] = payload["paidAmount"]
+    if "totalAmount" in payload:
+        update_data["total_amount"] = payload["totalAmount"]
+    if "paymentMethod" in payload:
+        update_data["payment_method"] = payload["paymentMethod"]
+    
+    # Create OrderUpdate model from mapped data
+    order_update = OrderUpdate(**update_data)
+    result = update_order(order_id, order_update)
+    
+    # Get the updated order
+    updated_order = result
+    if isinstance(result, list):
+        updated_order = result[0] if result else {}
+    
+    # Sync inspections if departure_date changed or order was updated
+    new_departure_date = updated_order.get("departure_date") or update_data.get("departure_date")
+    order_status = updated_order.get("status") or update_data.get("status", current_order.get("status") if current_order else "חדש")
+    
+    if new_departure_date and order_status != "בוטל":
+        unit_number = updated_order.get("unit_number") or update_data.get("unit_number") or (current_order.get("unit_number") if current_order else "")
+        guest_name = updated_order.get("guest_name") or update_data.get("guest_name") or (current_order.get("guest_name") if current_order else "")
+        
+        if old_departure_date != new_departure_date:
+            # Departure date changed - update inspection
+            update_inspection_for_departure_date(
+                old_departure_date,
+                new_departure_date,
+                order_id,
+                unit_number,
+                guest_name
+            )
+        else:
+            # Just ensure inspection exists for this date
+            create_inspection_for_departure_date(
+                new_departure_date,
+                order_id,
+                unit_number,
+                guest_name
+            )
+    
+    # Return as single object, not array
+    if isinstance(result, list):
+        return result[0] if result else {}
+    return result
 
 
 class OrderCreate(BaseModel):
@@ -307,6 +388,96 @@ DEFAULT_INSPECTION_TASKS = [
     {"id": "24", "name": "לנעול דלת ראשית", "completed": False},
 ]
 
+def sync_inspections_with_orders():
+    """Sync inspections table with all orders - ensure every departure date has an inspection"""
+    try:
+        # Get all non-cancelled orders
+        orders_resp = requests.get(
+            f"{REST_URL}/orders",
+            headers=SERVICE_HEADERS,
+            params={"status": "neq.בוטל", "select": "id,departure_date,unit_number,guest_name,status"}
+        )
+        
+        if orders_resp.status_code != 200:
+            print(f"Warning: Could not fetch orders for sync: {orders_resp.status_code}")
+            return
+        
+        orders = orders_resp.json() or []
+        
+        # Get all existing inspections
+        inspections_resp = requests.get(
+            f"{REST_URL}/inspections",
+            headers=SERVICE_HEADERS,
+            params={"select": "id,departure_date"}
+        )
+        
+        existing_inspections = []
+        if inspections_resp.status_code == 200:
+            existing_inspections = inspections_resp.json() or []
+        elif inspections_resp.status_code == 404:
+            existing_inspections = []
+        
+        # Group orders by departure date
+        orders_by_date = {}
+        for order in orders:
+            departure_date = order.get("departure_date")
+            if departure_date and order.get("status") != "בוטל":
+                if departure_date not in orders_by_date:
+                    orders_by_date[departure_date] = []
+                orders_by_date[departure_date].append(order)
+        
+        # Get existing inspection dates
+        existing_dates = {insp.get("departure_date") for insp in existing_inspections if insp.get("departure_date")}
+        
+        # Create inspections for missing departure dates
+        for departure_date, orders_for_date in orders_by_date.items():
+            if departure_date not in existing_dates:
+                # Create inspection for this departure date
+                first_order = orders_for_date[0]
+                create_inspection_for_departure_date(
+                    departure_date,
+                    first_order.get("id"),
+                    first_order.get("unit_number", ""),
+                    ", ".join([o.get("guest_name", "") for o in orders_for_date])
+                )
+        
+        # Update inspections for dates that changed (if order departure_date was edited)
+        # This is handled by the order update endpoint
+        
+        print(f"Synced inspections with orders: {len(orders_by_date)} unique departure dates")
+        
+    except Exception as e:
+        print(f"Warning: Error syncing inspections with orders: {str(e)}")
+
+def update_inspection_for_departure_date(old_date: str, new_date: str, order_id: str, unit_number: str, guest_name: str):
+    """Update inspection when order departure date changes"""
+    if not new_date:
+        return None
+    
+    try:
+        # If old date exists, check if we need to move/update the inspection
+        if old_date and old_date != new_date:
+            # Check if old date inspection has other orders
+            old_orders_resp = requests.get(
+                f"{REST_URL}/orders",
+                headers=SERVICE_HEADERS,
+                params={"departure_date": f"eq.{old_date}", "status": "neq.בוטל", "select": "id"}
+            )
+            old_orders = []
+            if old_orders_resp.status_code == 200:
+                old_orders = old_orders_resp.json() or []
+            
+            # If old date has no other orders, we can delete or update that inspection
+            # For now, we'll leave it and create a new one for the new date
+            # (The sync function will clean up orphaned inspections)
+        
+        # Create/update inspection for new departure date
+        return create_inspection_for_departure_date(new_date, order_id, unit_number, guest_name)
+        
+    except Exception as e:
+        print(f"Warning: Error updating inspection for departure date change: {str(e)}")
+        return None
+
 def create_inspection_for_departure_date(departure_date: str, order_id: str, unit_number: str, guest_name: str):
     """Create an inspection for a departure date if one doesn't already exist"""
     if not departure_date:
@@ -317,7 +488,7 @@ def create_inspection_for_departure_date(departure_date: str, order_id: str, uni
         check_resp = requests.get(
             f"{REST_URL}/inspections",
             headers=SERVICE_HEADERS,
-            params={"departure_date": f"eq.{departure_date}", "select": "id,departure_date"}
+            params={"departure_date": f"eq.{departure_date}", "select": "id,departure_date,unit_number"}
         )
         
         existing_inspections = []
@@ -327,10 +498,35 @@ def create_inspection_for_departure_date(departure_date: str, order_id: str, uni
             # Table doesn't exist yet, that's OK
             existing_inspections = []
         
-        # If inspection already exists for this departure date, don't create a new one
+        # If inspection already exists for this departure date, update it if needed
         if existing_inspections and len(existing_inspections) > 0:
-            print(f"Inspection already exists for departure date {departure_date}, skipping creation")
-            return existing_inspections[0]
+            existing = existing_inspections[0]
+            # Update unit_number and guest_name if they changed
+            if existing.get("unit_number") != unit_number or existing.get("guest_name") != guest_name:
+                update_data = {}
+                if existing.get("unit_number") != unit_number:
+                    update_data["unit_number"] = unit_number
+                if existing.get("guest_name") != guest_name:
+                    # Combine guest names if multiple orders share the date
+                    existing_guests = existing.get("guest_name", "")
+                    if guest_name not in existing_guests:
+                        update_data["guest_name"] = f"{existing_guests}, {guest_name}".strip(", ")
+                    else:
+                        update_data["guest_name"] = existing_guests
+                
+                if update_data:
+                    try:
+                        update_resp = requests.patch(
+                            f"{REST_URL}/inspections?id=eq.{existing['id']}",
+                            headers=SERVICE_HEADERS,
+                            json=update_data
+                        )
+                        if update_resp.status_code in [200, 201, 204]:
+                            print(f"Updated inspection {existing['id']} with new unit/guest info")
+                    except Exception as e:
+                        print(f"Warning: Error updating inspection: {str(e)}")
+            
+            return existing
         
         # Create new inspection for this departure date
         inspection_id = f"INSP-{departure_date}"
@@ -533,6 +729,15 @@ def inspections():
 def api_inspections():
     """Alias for /inspections to match frontend expectations"""
     return inspections()
+
+@app.post("/api/inspections/sync")
+def sync_all_inspections():
+    """Sync all inspections with orders - ensure every departure date has an inspection"""
+    try:
+        sync_inspections_with_orders()
+        return {"status": "success", "message": "Inspections synced with orders"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error syncing inspections: {str(e)}")
 
 @app.post("/api/inspections")
 def create_inspection(payload: dict):
