@@ -507,13 +507,17 @@ def create_inspection(payload: dict):
                 existing_resp = requests.get(
                     f"{REST_URL}/inspection_tasks",
                     headers=SERVICE_HEADERS,
-                    params={"inspection_id": f"eq.{inspection_id}", "select": "id"}
+                    params={"inspection_id": f"eq.{inspection_id}", "select": "id,name"}
                 )
                 if existing_resp.status_code == 200:
                     existing_tasks = existing_resp.json() or []
                     existing_task_ids = {t.get("id") for t in existing_tasks if t.get("id")}
-            except:
-                pass  # If we can't get existing tasks, we'll try to insert/update all
+                    print(f"Found {len(existing_task_ids)} existing tasks for inspection {inspection_id}: {existing_task_ids}")
+                else:
+                    print(f"No existing tasks found for inspection {inspection_id} (status: {existing_resp.status_code})")
+            except Exception as e:
+                print(f"Error getting existing tasks for inspection {inspection_id}: {str(e)}")
+                # If we can't get existing tasks, we'll try to insert/update all
             
             # Upsert tasks one by one (update if exists, insert if not)
             for task in tasks:
@@ -536,9 +540,13 @@ def create_inspection(payload: dict):
                     task_id = task_data["id"]
                     print(f"Saving task {task_id} ({task_data['name']}): completed={completed} (type: {type(completed).__name__})")
                     
-                    # Try to update if task exists, otherwise insert
-                    if task_id in existing_task_ids:
-                        # Task exists, update it
+                    # Try to update if task exists for THIS inspection, otherwise insert
+                    # IMPORTANT: Check if task exists for this specific inspection_id
+                    task_exists_for_this_inspection = task_id in existing_task_ids
+                    
+                    if task_exists_for_this_inspection:
+                        # Task exists for this inspection, update it
+                        print(f"  → Updating existing task {task_id} for inspection {inspection_id}")
                         update_resp = requests.patch(
                             f"{REST_URL}/inspection_tasks?id=eq.{task_id}&inspection_id=eq.{inspection_id}",
                             headers={**SERVICE_HEADERS, "Prefer": "return=representation"},
@@ -546,8 +554,10 @@ def create_inspection(payload: dict):
                         )
                         if update_resp.status_code in [200, 201, 204]:
                             saved_tasks.append(task_data)
+                            print(f"  ✓ Task {task_id} updated successfully")
                         else:
-                            # Update failed, try insert
+                            # Update failed, try insert (maybe task was deleted?)
+                            print(f"  ⚠ Update failed (status {update_resp.status_code}), trying insert...")
                             task_resp = requests.post(
                                 f"{REST_URL}/inspection_tasks",
                                 headers=SERVICE_HEADERS,
@@ -566,7 +576,8 @@ def create_inspection(payload: dict):
                                 print(f"  ✗ ERROR: Failed to insert task {task_id} after update failed: {task_resp.status_code} {error_text}")
                                 failed_tasks.append(task_data)
                     else:
-                        # Task doesn't exist, insert it
+                        # Task doesn't exist for this inspection, insert it
+                        print(f"  → Inserting new task {task_id} for inspection {inspection_id}")
                         task_resp = requests.post(
                             f"{REST_URL}/inspection_tasks",
                             headers=SERVICE_HEADERS,
@@ -581,7 +592,9 @@ def create_inspection(payload: dict):
                             print(f"  ✗ ERROR: Table doesn't exist (404) - task {task_id} NOT saved: {error_text}")
                             failed_tasks.append(task_data)
                         elif task_resp.status_code == 409:
-                            # Conflict - task was created by another request, try update
+                            # Conflict - task ID already exists (maybe for another inspection?)
+                            # Try to update it for this inspection_id
+                            print(f"  ⚠ Conflict (409) - task {task_id} may exist for another inspection, trying update...")
                             try:
                                 update_resp = requests.patch(
                                     f"{REST_URL}/inspection_tasks?id=eq.{task_id}&inspection_id=eq.{inspection_id}",
@@ -595,11 +608,12 @@ def create_inspection(payload: dict):
                                     error_text = update_resp.text[:200] if update_resp.text else ""
                                     print(f"  ✗ ERROR: Failed to update task {task_id} after conflict: {update_resp.status_code} {error_text}")
                                     failed_tasks.append(task_data)
-                            except:
+                            except Exception as e:
+                                print(f"  ✗ ERROR: Exception updating task {task_id} after conflict: {str(e)}")
                                 failed_tasks.append(task_data)
                         else:
                             error_text = task_resp.text[:200] if task_resp.text else ""
-                            print(f"ERROR: Failed to insert task {task_id}: {task_resp.status_code} {error_text}")
+                            print(f"  ✗ ERROR: Failed to insert task {task_id}: {task_resp.status_code} {error_text}")
                             print(f"  Task data: {task_data}")
                             failed_tasks.append(task_data)
                 except requests.exceptions.HTTPError as e:
