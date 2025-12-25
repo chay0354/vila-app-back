@@ -471,25 +471,29 @@ def create_inspection(payload: dict):
                 else:
                     raise
         
-        # Handle tasks
+        # Handle tasks - use upsert (update or insert) instead of delete + insert
+        # This prevents losing tasks if insertion fails
         tasks = payload.get("tasks", [])
         return_tasks = tasks  # Default to original tasks if nothing is saved
         saved_tasks = []
+        failed_tasks = []
+        
         if tasks:
-            # Delete existing tasks for this inspection
+            # First, get existing tasks for this inspection to see what needs updating vs inserting
+            existing_task_ids = set()
             try:
-                delete_resp = requests.delete(
-                    f"{REST_URL}/inspection_tasks?inspection_id=eq.{inspection_id}",
-                    headers=SERVICE_HEADERS
+                existing_resp = requests.get(
+                    f"{REST_URL}/inspection_tasks",
+                    headers=SERVICE_HEADERS,
+                    params={"inspection_id": f"eq.{inspection_id}", "select": "id"}
                 )
-                # Ignore errors if no tasks exist (404 is OK)
+                if existing_resp.status_code == 200:
+                    existing_tasks = existing_resp.json() or []
+                    existing_task_ids = {t.get("id") for t in existing_tasks if t.get("id")}
             except:
-                pass
+                pass  # If we can't get existing tasks, we'll try to insert/update all
             
-            # Insert tasks one by one, but don't fail the whole operation if some fail
-            # This is more resilient and allows partial success
-            # If table doesn't exist (404), that's OK - it will be created by migration
-            failed_tasks = []
+            # Upsert tasks one by one (update if exists, insert if not)
             for task in tasks:
                 try:
                     task_data = {
@@ -498,38 +502,60 @@ def create_inspection(payload: dict):
                         "name": task.get("name", ""),
                         "completed": bool(task.get("completed", False)),  # Ensure boolean
                     }
-                    task_resp = requests.post(
-                        f"{REST_URL}/inspection_tasks",
-                        headers=SERVICE_HEADERS,
-                        json=task_data
-                    )
-                    # Don't raise on error - continue with other tasks
-                    # 404 means table doesn't exist yet (will be created by migration)
-                    # Other errors we'll log but continue
-                    if task_resp.status_code in [200, 201]:
-                        saved_tasks.append(task_data)
-                    elif task_resp.status_code == 404:
-                        # Table doesn't exist - that's OK, continue
-                        saved_tasks.append(task_data)  # Still include in response
-                    elif task_resp.status_code == 409:
-                        # Task already exists, try to update it instead
-                        try:
-                            update_resp = requests.patch(
-                                f"{REST_URL}/inspection_tasks?id=eq.{task_data['id']}&inspection_id=eq.{inspection_id}",
-                                headers={**SERVICE_HEADERS, "Prefer": "return=representation"},
-                                json={"completed": task_data["completed"]}
+                    task_id = task_data["id"]
+                    
+                    # Try to update if task exists, otherwise insert
+                    if task_id in existing_task_ids:
+                        # Task exists, update it
+                        update_resp = requests.patch(
+                            f"{REST_URL}/inspection_tasks?id=eq.{task_id}&inspection_id=eq.{inspection_id}",
+                            headers={**SERVICE_HEADERS, "Prefer": "return=representation"},
+                            json={"completed": task_data["completed"], "name": task_data["name"]}
+                        )
+                        if update_resp.status_code in [200, 201, 204]:
+                            saved_tasks.append(task_data)
+                        else:
+                            # Update failed, try insert
+                            task_resp = requests.post(
+                                f"{REST_URL}/inspection_tasks",
+                                headers=SERVICE_HEADERS,
+                                json=task_data
                             )
-                            if update_resp.status_code in [200, 201, 204]:
+                            if task_resp.status_code in [200, 201]:
                                 saved_tasks.append(task_data)
+                            elif task_resp.status_code == 404:
+                                saved_tasks.append(task_data)  # Table doesn't exist, but include in response
                             else:
                                 failed_tasks.append(task_data)
-                        except:
-                            failed_tasks.append(task_data)
                     else:
-                        # Other error - log but continue
-                        error_text = task_resp.text[:200] if task_resp.text else ""
-                        print(f"Warning: Failed to save task {task_data.get('id')}: {task_resp.status_code} {error_text}")
-                        failed_tasks.append(task_data)
+                        # Task doesn't exist, insert it
+                        task_resp = requests.post(
+                            f"{REST_URL}/inspection_tasks",
+                            headers=SERVICE_HEADERS,
+                            json=task_data
+                        )
+                        if task_resp.status_code in [200, 201]:
+                            saved_tasks.append(task_data)
+                        elif task_resp.status_code == 404:
+                            saved_tasks.append(task_data)  # Table doesn't exist, but include in response
+                        elif task_resp.status_code == 409:
+                            # Conflict - task was created by another request, try update
+                            try:
+                                update_resp = requests.patch(
+                                    f"{REST_URL}/inspection_tasks?id=eq.{task_id}&inspection_id=eq.{inspection_id}",
+                                    headers={**SERVICE_HEADERS, "Prefer": "return=representation"},
+                                    json={"completed": task_data["completed"], "name": task_data["name"]}
+                                )
+                                if update_resp.status_code in [200, 201, 204]:
+                                    saved_tasks.append(task_data)
+                                else:
+                                    failed_tasks.append(task_data)
+                            except:
+                                failed_tasks.append(task_data)
+                        else:
+                            error_text = task_resp.text[:200] if task_resp.text else ""
+                            print(f"Warning: Failed to save task {task_id}: {task_resp.status_code} {error_text}")
+                            failed_tasks.append(task_data)
                 except requests.exceptions.HTTPError as e:
                     # If table doesn't exist (404), that's OK
                     if e.response and e.response.status_code == 404:
