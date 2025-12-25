@@ -473,6 +473,8 @@ def create_inspection(payload: dict):
         
         # Handle tasks
         tasks = payload.get("tasks", [])
+        return_tasks = tasks  # Default to original tasks if nothing is saved
+        saved_tasks = []
         if tasks:
             # Delete existing tasks for this inspection
             try:
@@ -493,7 +495,7 @@ def create_inspection(payload: dict):
                         "id": task.get("id") or str(uuid.uuid4()),
                         "inspection_id": inspection_id,
                         "name": task.get("name", ""),
-                        "completed": task.get("completed", False),
+                        "completed": bool(task.get("completed", False)),  # Ensure boolean
                     }
                     task_resp = requests.post(
                         f"{REST_URL}/inspection_tasks",
@@ -503,21 +505,35 @@ def create_inspection(payload: dict):
                     # Don't raise on error - continue with other tasks
                     # 404 means table doesn't exist yet (will be created by migration)
                     # Other errors we'll log but continue
-                    if task_resp.status_code == 404:
+                    if task_resp.status_code in [200, 201]:
+                        saved_tasks.append(task_data)
+                    elif task_resp.status_code == 404:
                         # Table doesn't exist - that's OK, continue
-                        pass
+                        saved_tasks.append(task_data)  # Still include in response
                     elif task_resp.status_code not in [200, 201]:
                         # Other error - log but continue
-                        pass
+                        error_text = task_resp.text[:200] if task_resp.text else ""
+                        print(f"Warning: Failed to save task {task_data.get('id')}: {task_resp.status_code} {error_text}")
                 except requests.exceptions.HTTPError as e:
                     # If table doesn't exist (404), that's OK
                     if e.response and e.response.status_code == 404:
-                        pass
-                    # Otherwise, continue with other tasks
+                        saved_tasks.append({
+                            "id": task.get("id") or str(uuid.uuid4()),
+                            "inspection_id": inspection_id,
+                            "name": task.get("name", ""),
+                            "completed": bool(task.get("completed", False)),
+                        })
+                    else:
+                        error_text = e.response.text[:200] if e.response and e.response.text else str(e)
+                        print(f"Warning: Failed to save task: {error_text}")
                 except Exception as e:
                     # Any other error - continue with other tasks
-                    # This prevents one failed task from breaking the whole operation
+                    print(f"Warning: Exception saving task: {str(e)}")
                     pass
+        
+        # Return tasks that were saved (or attempted to be saved)
+        if saved_tasks:
+            return_tasks = saved_tasks
         
         # Return the created/updated inspection with tasks
         return {
@@ -527,7 +543,7 @@ def create_inspection(payload: dict):
             "guestName": inspection_data["guest_name"],
             "departureDate": inspection_data["departure_date"],
             "status": inspection_data["status"],
-            "tasks": tasks,
+            "tasks": return_tasks,
         }
     except requests.exceptions.HTTPError as e:
         error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
