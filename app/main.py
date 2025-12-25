@@ -570,8 +570,10 @@ def create_inspection(payload: dict):
                         )
                         if task_resp.status_code in [200, 201]:
                             saved_tasks.append(task_data)
+                            print(f"  ✓ Task {task_id} inserted successfully")
                         elif task_resp.status_code == 404:
                             saved_tasks.append(task_data)  # Table doesn't exist, but include in response
+                            print(f"  ⚠ Table doesn't exist (404), but including task in response")
                         elif task_resp.status_code == 409:
                             # Conflict - task was created by another request, try update
                             try:
@@ -582,7 +584,10 @@ def create_inspection(payload: dict):
                                 )
                                 if update_resp.status_code in [200, 201, 204]:
                                     saved_tasks.append(task_data)
+                                    print(f"  ✓ Task {task_id} updated after conflict")
                                 else:
+                                    error_text = update_resp.text[:200] if update_resp.text else ""
+                                    print(f"  ✗ ERROR: Failed to update task {task_id} after conflict: {update_resp.status_code} {error_text}")
                                     failed_tasks.append(task_data)
                             except:
                                 failed_tasks.append(task_data)
