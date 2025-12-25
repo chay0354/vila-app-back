@@ -11,3 +11,6 @@ from app.main import app
 # Export app directly - Vercel natively supports ASGI applications like FastAPI
 # Do NOT use 'handler' variable name as Vercel expects that to be a BaseHTTPRequestHandler subclass
 
+# Make app available for Vercel
+__all__ = ['app']
+

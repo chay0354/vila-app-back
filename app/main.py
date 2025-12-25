@@ -326,6 +326,9 @@ def inspections():
     try:
         # First get all inspections
         resp = requests.get(f"{REST_URL}/inspections", headers=SERVICE_HEADERS, params={"select": "*"})
+        # If table doesn't exist (404), return empty array
+        if resp.status_code == 404:
+            return []
         resp.raise_for_status()
         inspections_list = resp.json() or []
         
