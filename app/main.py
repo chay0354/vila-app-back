@@ -555,11 +555,15 @@ def create_inspection(payload: dict):
                             )
                             if task_resp.status_code in [200, 201]:
                                 saved_tasks.append(task_data)
+                                print(f"  ✓ Task {task_id} inserted successfully (after update failed)")
                             elif task_resp.status_code == 404:
-                                saved_tasks.append(task_data)  # Table doesn't exist, but include in response
+                                # Table doesn't exist - this is a real error, don't treat as success
+                                error_text = task_resp.text[:200] if task_resp.text else ""
+                                print(f"  ✗ ERROR: Table doesn't exist (404) - task {task_id} NOT saved: {error_text}")
+                                failed_tasks.append(task_data)
                             else:
                                 error_text = task_resp.text[:200] if task_resp.text else ""
-                                print(f"ERROR: Failed to insert task {task_id} after update failed: {task_resp.status_code} {error_text}")
+                                print(f"  ✗ ERROR: Failed to insert task {task_id} after update failed: {task_resp.status_code} {error_text}")
                                 failed_tasks.append(task_data)
                     else:
                         # Task doesn't exist, insert it
@@ -572,8 +576,10 @@ def create_inspection(payload: dict):
                             saved_tasks.append(task_data)
                             print(f"  ✓ Task {task_id} inserted successfully")
                         elif task_resp.status_code == 404:
-                            saved_tasks.append(task_data)  # Table doesn't exist, but include in response
-                            print(f"  ⚠ Table doesn't exist (404), but including task in response")
+                            # Table doesn't exist - this is a real error, don't treat as success
+                            error_text = task_resp.text[:200] if task_resp.text else ""
+                            print(f"  ✗ ERROR: Table doesn't exist (404) - task {task_id} NOT saved: {error_text}")
+                            failed_tasks.append(task_data)
                         elif task_resp.status_code == 409:
                             # Conflict - task was created by another request, try update
                             try:
@@ -668,12 +674,14 @@ def create_inspection(payload: dict):
             "departureDate": inspection_data["departure_date"],
             "status": inspection_data["status"],
             "tasks": return_tasks,
-            "savedTasksCount": len(saved_tasks),
+            "savedTasksCount": len(saved_tasks),  # Only count actually saved tasks
             "totalTasksCount": len(tasks),
             "completedTasksCount": completed_count,
+            "failedTasksCount": len(failed_tasks),  # Add failed count so frontend knows
         }
-        print(f"Returning inspection result: {len(return_tasks)} tasks, {completed_count} completed")
-        print(f"Sample task from result: {return_tasks[0] if return_tasks else 'none'}")
+        print(f"Returning inspection result: {len(return_tasks)} tasks ({len(saved_tasks)} saved, {len(failed_tasks)} failed), {completed_count} completed")
+        if return_tasks:
+            print(f"Sample task from result: id={return_tasks[0].get('id')}, completed={return_tasks[0].get('completed')}")
         return result
     except requests.exceptions.HTTPError as e:
         error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
