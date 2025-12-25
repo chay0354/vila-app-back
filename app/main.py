@@ -253,30 +253,51 @@ def api_update_order(order_id: str, payload: dict):
     
     old_departure_date = current_order.get("departure_date") if current_order else None
     
-    # Map frontend camelCase to backend snake_case
+    # Map frontend camelCase or snake_case to backend snake_case
+    # Only include fields that are actually provided and not empty
     update_data = {}
-    if "guestName" in payload:
-        update_data["guest_name"] = payload["guestName"]
-    if "unitNumber" in payload:
-        update_data["unit_number"] = payload["unitNumber"]
-    if "arrivalDate" in payload:
-        update_data["arrival_date"] = payload["arrivalDate"]
-    if "departureDate" in payload:
-        update_data["departure_date"] = payload["departureDate"]
-    if "status" in payload:
+    if "guestName" in payload or "guest_name" in payload:
+        val = payload.get("guestName") or payload.get("guest_name")
+        if val and val.strip():
+            update_data["guest_name"] = val.strip()
+    if "unitNumber" in payload or "unit_number" in payload:
+        val = payload.get("unitNumber") or payload.get("unit_number")
+        if val and val.strip():
+            update_data["unit_number"] = val.strip()
+    if "arrivalDate" in payload or "arrival_date" in payload:
+        val = payload.get("arrivalDate") or payload.get("arrival_date")
+        if val and val.strip():
+            update_data["arrival_date"] = val.strip()
+    if "departureDate" in payload or "departure_date" in payload:
+        val = payload.get("departureDate") or payload.get("departure_date")
+        if val and val.strip():
+            update_data["departure_date"] = val.strip()
+    if "status" in payload and payload["status"]:
         update_data["status"] = payload["status"]
-    if "guestsCount" in payload:
-        update_data["guests_count"] = payload["guestsCount"]
-    if "specialRequests" in payload:
-        update_data["special_requests"] = payload["specialRequests"]
-    if "internalNotes" in payload:
-        update_data["internal_notes"] = payload["internalNotes"]
-    if "paidAmount" in payload:
-        update_data["paid_amount"] = payload["paidAmount"]
-    if "totalAmount" in payload:
-        update_data["total_amount"] = payload["totalAmount"]
-    if "paymentMethod" in payload:
-        update_data["payment_method"] = payload["paymentMethod"]
+    if "guestsCount" in payload or "guests_count" in payload:
+        val = payload.get("guestsCount") or payload.get("guests_count")
+        if val is not None:
+            update_data["guests_count"] = val
+    if "specialRequests" in payload or "special_requests" in payload:
+        val = payload.get("specialRequests") or payload.get("special_requests")
+        if val is not None:
+            update_data["special_requests"] = val
+    if "internalNotes" in payload or "internal_notes" in payload:
+        val = payload.get("internalNotes") or payload.get("internal_notes")
+        if val is not None:
+            update_data["internal_notes"] = val
+    if "paidAmount" in payload or "paid_amount" in payload:
+        val = payload.get("paidAmount") or payload.get("paid_amount")
+        if val is not None:
+            update_data["paid_amount"] = val
+    if "totalAmount" in payload or "total_amount" in payload:
+        val = payload.get("totalAmount") or payload.get("total_amount")
+        if val is not None:
+            update_data["total_amount"] = val
+    if "paymentMethod" in payload or "payment_method" in payload:
+        val = payload.get("paymentMethod") or payload.get("payment_method")
+        if val is not None:
+            update_data["payment_method"] = val
     
     # Create OrderUpdate model from mapped data
     order_update = OrderUpdate(**update_data)
