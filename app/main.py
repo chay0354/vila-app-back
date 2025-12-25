@@ -340,12 +340,15 @@ def inspections():
             # Get all tasks for these inspections
             # Supabase PostgREST IN query format: in.(value1,value2,value3)
             try:
+                # Format: in.(id1,id2,id3) - no spaces after commas
                 inspection_ids_str = ','.join(inspection_ids)
                 tasks_resp = requests.get(
                     f"{REST_URL}/inspection_tasks",
                     headers=SERVICE_HEADERS,
                     params={"inspection_id": f"in.({inspection_ids_str})", "select": "*"}
                 )
+                print(f"Loading tasks for inspections: {inspection_ids_str}")
+                print(f"Tasks query status: {tasks_resp.status_code}")
                 # If table doesn't exist (404), that's OK - return empty tasks
                 if tasks_resp.status_code == 404:
                     all_tasks = []
@@ -363,16 +366,28 @@ def inspections():
                 all_tasks = []
             
             # Group tasks by inspection_id
+            print(f"Loaded {len(all_tasks)} tasks from database")
             for task in all_tasks:
                 insp_id = task.get("inspection_id")
                 if insp_id:
                     if insp_id not in tasks_by_inspection:
                         tasks_by_inspection[insp_id] = []
-                    tasks_by_inspection[insp_id].append({
+                    # Ensure completed is a boolean (not string "true"/"false")
+                    completed = task.get("completed", False)
+                    if isinstance(completed, str):
+                        completed = completed.lower() in ('true', '1', 'yes', 'on')
+                    elif completed is None:
+                        completed = False
+                    else:
+                        completed = bool(completed)
+                    
+                    task_data = {
                         "id": task.get("id"),
                         "name": task.get("name"),
-                        "completed": task.get("completed", False),
-                    })
+                        "completed": completed,
+                    }
+                    print(f"Task {task_data['id']} ({task_data['name']}): completed={completed} (type: {type(completed)})")
+                    tasks_by_inspection[insp_id].append(task_data)
         
         # Combine inspections with their tasks
         result = []
@@ -496,13 +511,23 @@ def create_inspection(payload: dict):
             # Upsert tasks one by one (update if exists, insert if not)
             for task in tasks:
                 try:
+                    # Ensure completed is a boolean
+                    completed = task.get("completed", False)
+                    if isinstance(completed, str):
+                        completed = completed.lower() in ('true', '1', 'yes', 'on')
+                    elif completed is None:
+                        completed = False
+                    else:
+                        completed = bool(completed)
+                    
                     task_data = {
                         "id": task.get("id") or str(uuid.uuid4()),
                         "inspection_id": inspection_id,
                         "name": task.get("name", ""),
-                        "completed": bool(task.get("completed", False)),  # Ensure boolean
+                        "completed": completed,  # Ensure boolean
                     }
                     task_id = task_data["id"]
+                    print(f"Saving task {task_id} ({task_data['name']}): completed={completed} (type: {type(completed).__name__})")
                     
                     # Try to update if task exists, otherwise insert
                     if task_id in existing_task_ids:
@@ -612,7 +637,7 @@ def create_inspection(payload: dict):
         # Return the created/updated inspection with tasks
         # Include metadata about save success
         completed_count = sum(1 for t in return_tasks if t.get("completed", False))
-        return {
+        result = {
             "id": inspection_id,
             "orderId": order_id,
             "unitNumber": inspection_data["unit_number"],
@@ -624,6 +649,9 @@ def create_inspection(payload: dict):
             "totalTasksCount": len(tasks),
             "completedTasksCount": completed_count,
         }
+        print(f"Returning inspection result: {len(return_tasks)} tasks, {completed_count} completed")
+        print(f"Sample task from result: {return_tasks[0] if return_tasks else 'none'}")
+        return result
     except requests.exceptions.HTTPError as e:
         error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
         raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
