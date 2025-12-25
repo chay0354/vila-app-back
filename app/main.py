@@ -326,10 +326,8 @@ def inspections(type: str = None):
     try:
         # Build query params
         params = {"select": "*"}
-        if type:
-            params["type"] = f"eq.{type}"
         
-        # First get all inspections (filtered by type if provided)
+        # First get all inspections
         resp = requests.get(f"{REST_URL}/inspections", headers=SERVICE_HEADERS, params=params)
         # If table doesn't exist (404), return empty array
         if resp.status_code == 404:
@@ -401,10 +399,16 @@ def inspections(type: str = None):
                 completed_count = sum(1 for t in tasks_by_inspection.get(insp_id, []) if t.get("completed", False))
                 print(f"Inspection {insp_id}: {completed_count}/{task_count} tasks completed")
         
-        # Combine inspections with their tasks
+        # Combine inspections with their tasks and filter by type if requested
         result = []
         for inspection in inspections_list:
             insp_id = inspection.get("id")
+            inspection_type = inspection.get("type") or "exit"  # Default to 'exit' if type column doesn't exist
+            
+            # Filter by type if requested (in Python, not SQL, to handle missing column gracefully)
+            if type and inspection_type != type:
+                continue
+            
             inspection_with_tasks = inspection.copy()
             inspection_with_tasks["tasks"] = tasks_by_inspection.get(insp_id, [])
             result.append(inspection_with_tasks)
