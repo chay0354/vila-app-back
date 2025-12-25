@@ -489,6 +489,7 @@ def create_inspection(payload: dict):
             # Insert tasks one by one, but don't fail the whole operation if some fail
             # This is more resilient and allows partial success
             # If table doesn't exist (404), that's OK - it will be created by migration
+            failed_tasks = []
             for task in tasks:
                 try:
                     task_data = {
@@ -510,10 +511,25 @@ def create_inspection(payload: dict):
                     elif task_resp.status_code == 404:
                         # Table doesn't exist - that's OK, continue
                         saved_tasks.append(task_data)  # Still include in response
-                    elif task_resp.status_code not in [200, 201]:
+                    elif task_resp.status_code == 409:
+                        # Task already exists, try to update it instead
+                        try:
+                            update_resp = requests.patch(
+                                f"{REST_URL}/inspection_tasks?id=eq.{task_data['id']}&inspection_id=eq.{inspection_id}",
+                                headers={**SERVICE_HEADERS, "Prefer": "return=representation"},
+                                json={"completed": task_data["completed"]}
+                            )
+                            if update_resp.status_code in [200, 201, 204]:
+                                saved_tasks.append(task_data)
+                            else:
+                                failed_tasks.append(task_data)
+                        except:
+                            failed_tasks.append(task_data)
+                    else:
                         # Other error - log but continue
                         error_text = task_resp.text[:200] if task_resp.text else ""
                         print(f"Warning: Failed to save task {task_data.get('id')}: {task_resp.status_code} {error_text}")
+                        failed_tasks.append(task_data)
                 except requests.exceptions.HTTPError as e:
                     # If table doesn't exist (404), that's OK
                     if e.response and e.response.status_code == 404:
@@ -526,16 +542,32 @@ def create_inspection(payload: dict):
                     else:
                         error_text = e.response.text[:200] if e.response and e.response.text else str(e)
                         print(f"Warning: Failed to save task: {error_text}")
+                        failed_tasks.append({
+                            "id": task.get("id") or str(uuid.uuid4()),
+                            "inspection_id": inspection_id,
+                            "name": task.get("name", ""),
+                            "completed": bool(task.get("completed", False)),
+                        })
                 except Exception as e:
                     # Any other error - continue with other tasks
                     print(f"Warning: Exception saving task: {str(e)}")
-                    pass
+                    failed_tasks.append({
+                        "id": task.get("id") or str(uuid.uuid4()),
+                        "inspection_id": inspection_id,
+                        "name": task.get("name", ""),
+                        "completed": bool(task.get("completed", False)),
+                    })
+            
+            # Log summary
+            print(f"Inspection {inspection_id}: Saved {len(saved_tasks)}/{len(tasks)} tasks. Failed: {len(failed_tasks)}")
         
         # Return tasks that were saved (or attempted to be saved)
         if saved_tasks:
             return_tasks = saved_tasks
         
         # Return the created/updated inspection with tasks
+        # Include metadata about save success
+        completed_count = sum(1 for t in return_tasks if t.get("completed", False))
         return {
             "id": inspection_id,
             "orderId": order_id,
@@ -544,6 +576,9 @@ def create_inspection(payload: dict):
             "departureDate": inspection_data["departure_date"],
             "status": inspection_data["status"],
             "tasks": return_tasks,
+            "savedTasksCount": len(saved_tasks),
+            "totalTasksCount": len(tasks),
+            "completedTasksCount": completed_count,
         }
     except requests.exceptions.HTTPError as e:
         error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
