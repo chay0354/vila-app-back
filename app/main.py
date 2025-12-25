@@ -425,6 +425,9 @@ def create_inspection(payload: dict):
         inspection_id = payload.get("id") or str(uuid.uuid4())
         order_id = payload.get("orderId") or payload.get("order_id")
         
+        # Get inspection type (default to 'exit' for backward compatibility)
+        inspection_type = payload.get("type") or "exit"
+        
         # Create or update inspection
         inspection_data = {
             "id": inspection_id,
@@ -433,6 +436,7 @@ def create_inspection(payload: dict):
             "guest_name": payload.get("guestName") or payload.get("guest_name", ""),
             "departure_date": payload.get("departureDate") or payload.get("departure_date", ""),
             "status": payload.get("status", "זמן הביקורות טרם הגיע"),
+            "type": inspection_type,  # Add type field
         }
         
         # Check if inspection exists
