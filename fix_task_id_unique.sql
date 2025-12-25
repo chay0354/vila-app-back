@@ -17,3 +17,5 @@ ALTER TABLE inspection_tasks ADD PRIMARY KEY (id, inspection_id);
 -- FROM information_schema.table_constraints 
 -- WHERE table_name = 'inspection_tasks' AND constraint_type = 'PRIMARY KEY';
 
+
+

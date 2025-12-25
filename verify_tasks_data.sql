@@ -44,3 +44,5 @@ LEFT JOIN inspections i ON it.inspection_id = i.id
 ORDER BY it.id DESC
 LIMIT 50;
 
+
+

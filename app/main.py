@@ -279,6 +279,111 @@ def create_order(payload: OrderCreate):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating order: {str(e)}")
 
+# Default inspection tasks (24 tasks)
+DEFAULT_INSPECTION_TASKS = [
+    {"id": "1", "name": "לשים כלור בבריכה", "completed": False},
+    {"id": "2", "name": "להוסיף מים בבריכה", "completed": False},
+    {"id": "3", "name": "לנקות רובוט ולהפעיל", "completed": False},
+    {"id": "4", "name": "לנקות רשת פנים המנוע", "completed": False},
+    {"id": "5", "name": "לעשות בקווש שטיפה לפילטר", "completed": False},
+    {"id": "6", "name": "לטאטא הבק מהמדרגות ומשטחי רביצה", "completed": False},
+    {"id": "7", "name": "לשים כלור בגקוזי", "completed": False},
+    {"id": "8", "name": "להוסיף מים בגקוזי", "completed": False},
+    {"id": "9", "name": "לנקות רובוט גקוזי ולהפעיל", "completed": False},
+    {"id": "10", "name": "לנקות רשת פנים המנוע גקוזי", "completed": False},
+    {"id": "11", "name": "לעשות בקווש שטיפה לפילטר גקוזי", "completed": False},
+    {"id": "12", "name": "לטאטא הבק מהמדרגות ומשטחי רביצה גקוזי", "completed": False},
+    {"id": "13", "name": "ניקיון חדרים", "completed": False},
+    {"id": "14", "name": "ניקיון מטבח", "completed": False},
+    {"id": "15", "name": "ניקיון שירותים", "completed": False},
+    {"id": "16", "name": "פינוי זבל לפח אשפה פנים וחוץ הוילה", "completed": False},
+    {"id": "17", "name": "בדיקת מכשירים", "completed": False},
+    {"id": "18", "name": "בדיקת מצב ריהוט", "completed": False},
+    {"id": "19", "name": "החלפת מצעים", "completed": False},
+    {"id": "20", "name": "החלפת מגבות", "completed": False},
+    {"id": "21", "name": "בדיקת מלאי", "completed": False},
+    {"id": "22", "name": "לבדוק תקינות חדרים", "completed": False},
+    {"id": "23", "name": "כיבוי אורות פנים וחוץ הוילה", "completed": False},
+    {"id": "24", "name": "לנעול דלת ראשית", "completed": False},
+]
+
+def create_inspection_for_departure_date(departure_date: str, order_id: str, unit_number: str, guest_name: str):
+    """Create an inspection for a departure date if one doesn't already exist"""
+    if not departure_date:
+        return None
+    
+    try:
+        # Check if inspection already exists for this departure date
+        check_resp = requests.get(
+            f"{REST_URL}/inspections",
+            headers=SERVICE_HEADERS,
+            params={"departure_date": f"eq.{departure_date}", "select": "id,departure_date"}
+        )
+        
+        existing_inspections = []
+        if check_resp.status_code == 200:
+            existing_inspections = check_resp.json() or []
+        elif check_resp.status_code == 404:
+            # Table doesn't exist yet, that's OK
+            existing_inspections = []
+        
+        # If inspection already exists for this departure date, don't create a new one
+        if existing_inspections and len(existing_inspections) > 0:
+            print(f"Inspection already exists for departure date {departure_date}, skipping creation")
+            return existing_inspections[0]
+        
+        # Create new inspection for this departure date
+        inspection_id = f"INSP-{departure_date}"
+        inspection_data = {
+            "id": inspection_id,
+            "order_id": order_id,  # Keep first order ID for reference
+            "unit_number": unit_number,
+            "guest_name": guest_name,
+            "departure_date": departure_date,
+            "status": "זמן הביקורות טרם הגיע",
+        }
+        
+        # Create inspection
+        create_resp = requests.post(
+            f"{REST_URL}/inspections",
+            headers=SERVICE_HEADERS,
+            json=inspection_data
+        )
+        
+        if create_resp.status_code not in [200, 201, 404, 409]:
+            # If not 404 (table doesn't exist) or 409 (conflict), log error but don't fail
+            if create_resp.status_code != 404 and create_resp.status_code != 409:
+                print(f"Warning: Failed to create inspection for departure date {departure_date}: {create_resp.status_code}")
+        
+        # Create all default tasks for this inspection
+        for task in DEFAULT_INSPECTION_TASKS:
+            task_data = {
+                "id": task["id"],
+                "inspection_id": inspection_id,
+                "name": task["name"],
+                "completed": task["completed"],
+            }
+            
+            try:
+                task_resp = requests.post(
+                    f"{REST_URL}/inspection_tasks",
+                    headers=SERVICE_HEADERS,
+                    json=task_data
+                )
+                # Ignore 404 (table doesn't exist) and 409 (task already exists)
+                if task_resp.status_code not in [200, 201, 404, 409]:
+                    print(f"Warning: Failed to create task {task['id']} for inspection {inspection_id}: {task_resp.status_code}")
+            except Exception as e:
+                print(f"Warning: Error creating task {task['id']}: {str(e)}")
+        
+        print(f"Created inspection {inspection_id} for departure date {departure_date}")
+        return inspection_data
+        
+    except Exception as e:
+        # Don't fail order creation if inspection creation fails
+        print(f"Warning: Failed to create inspection for departure date {departure_date}: {str(e)}")
+        return None
+
 @app.post("/api/orders")
 def api_create_order(payload: dict):
     """Create order with frontend camelCase format"""
@@ -300,6 +405,22 @@ def api_create_order(payload: dict):
     # Create OrderCreate model from mapped data
     order_create = OrderCreate(**order_data)
     result = create_order(order_create)
+    
+    # Get the created order (handle both single object and list responses)
+    created_order = result
+    if isinstance(result, list):
+        created_order = result[0] if result else {}
+    
+    # Automatically create inspection for the departure date if order was created successfully
+    if created_order and created_order.get("departure_date"):
+        departure_date = created_order.get("departure_date")
+        order_id = created_order.get("id") or order_data.get("id")
+        unit_number = created_order.get("unit_number") or order_data.get("unit_number", "")
+        guest_name = created_order.get("guest_name") or order_data.get("guest_name", "")
+        
+        # Only create inspection if order status is not cancelled
+        if created_order.get("status") != "בוטל":
+            create_inspection_for_departure_date(departure_date, order_id, unit_number, guest_name)
     
     # Return as single object, not array
     if isinstance(result, list):

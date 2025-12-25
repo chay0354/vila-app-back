@@ -32,3 +32,5 @@ LEFT JOIN inspection_tasks it ON i.id = it.inspection_id
 GROUP BY i.id, i.unit_number, i.guest_name
 ORDER BY i.id;
 
+
+

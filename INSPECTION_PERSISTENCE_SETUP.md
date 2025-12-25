@@ -74,3 +74,5 @@ Both PWA and Native app now:
 2. When you reload the app, it loads inspections from the database with their saved completion status
 3. Task completion persists across all devices and sessions
 
+
+

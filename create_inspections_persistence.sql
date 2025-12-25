@@ -38,3 +38,5 @@ CREATE POLICY "anon update inspection_tasks" ON inspection_tasks FOR UPDATE TO a
 DROP POLICY IF EXISTS "anon delete inspection_tasks" ON inspection_tasks;
 CREATE POLICY "anon delete inspection_tasks" ON inspection_tasks FOR DELETE TO anon USING (true);
 
+
+
