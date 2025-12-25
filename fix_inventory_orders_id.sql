@@ -34,3 +34,8 @@ JOIN information_schema.key_column_usage AS kcu
 WHERE tc.table_name = 'inventory_orders' 
   AND tc.constraint_type = 'PRIMARY KEY';
 
+
+
+
+
+

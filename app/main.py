@@ -322,12 +322,175 @@ def delete_order(order_id: str):
 
 @app.get("/inspections")
 def inspections():
+    """Get all inspections with their tasks"""
     try:
+        # First get all inspections
         resp = requests.get(f"{REST_URL}/inspections", headers=SERVICE_HEADERS, params={"select": "*"})
         resp.raise_for_status()
-        return resp.json()
+        inspections_list = resp.json() or []
+        
+        # Then get all tasks for these inspections
+        inspection_ids = [insp.get("id") for insp in inspections_list if insp.get("id")]
+        tasks_by_inspection = {}
+        
+        if inspection_ids:
+            # Get all tasks for these inspections
+            # Supabase PostgREST IN query format: in.(value1,value2,value3)
+            inspection_ids_str = ','.join(inspection_ids)
+            tasks_resp = requests.get(
+                f"{REST_URL}/inspection_tasks",
+                headers=SERVICE_HEADERS,
+                params={"inspection_id": f"in.({inspection_ids_str})", "select": "*"}
+            )
+            tasks_resp.raise_for_status()
+            all_tasks = tasks_resp.json() or []
+            
+            # Group tasks by inspection_id
+            for task in all_tasks:
+                insp_id = task.get("inspection_id")
+                if insp_id:
+                    if insp_id not in tasks_by_inspection:
+                        tasks_by_inspection[insp_id] = []
+                    tasks_by_inspection[insp_id].append({
+                        "id": task.get("id"),
+                        "name": task.get("name"),
+                        "completed": task.get("completed", False),
+                    })
+        
+        # Combine inspections with their tasks
+        result = []
+        for inspection in inspections_list:
+            insp_id = inspection.get("id")
+            inspection_with_tasks = inspection.copy()
+            inspection_with_tasks["tasks"] = tasks_by_inspection.get(insp_id, [])
+            result.append(inspection_with_tasks)
+        
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching inspections: {str(e)}")
+
+@app.get("/api/inspections")
+def api_inspections():
+    """Alias for /inspections to match frontend expectations"""
+    return inspections()
+
+@app.post("/api/inspections")
+def create_inspection(payload: dict):
+    """Create or update an inspection mission with its tasks"""
+    try:
+        inspection_id = payload.get("id") or str(uuid.uuid4())
+        order_id = payload.get("orderId") or payload.get("order_id")
+        
+        # Create or update inspection
+        inspection_data = {
+            "id": inspection_id,
+            "order_id": order_id,
+            "unit_number": payload.get("unitNumber") or payload.get("unit_number", ""),
+            "guest_name": payload.get("guestName") or payload.get("guest_name", ""),
+            "departure_date": payload.get("departureDate") or payload.get("departure_date", ""),
+            "status": payload.get("status", "זמן הביקורות טרם הגיע"),
+        }
+        
+        # Check if inspection exists
+        check_resp = requests.get(
+            f"{REST_URL}/inspections",
+            headers=SERVICE_HEADERS,
+            params={"id": f"eq.{inspection_id}", "select": "id"}
+        )
+        check_resp.raise_for_status()
+        existing = check_resp.json()
+        
+        if existing and len(existing) > 0:
+            # Update existing inspection
+            update_resp = requests.patch(
+                f"{REST_URL}/inspections?id=eq.{inspection_id}",
+                headers={**SERVICE_HEADERS, "Prefer": "return=representation"},
+                json=inspection_data
+            )
+            update_resp.raise_for_status()
+        else:
+            # Create new inspection
+            create_resp = requests.post(
+                f"{REST_URL}/inspections",
+                headers=SERVICE_HEADERS,
+                json=inspection_data
+            )
+            create_resp.raise_for_status()
+        
+        # Handle tasks
+        tasks = payload.get("tasks", [])
+        if tasks:
+            # Delete existing tasks for this inspection
+            delete_resp = requests.delete(
+                f"{REST_URL}/inspection_tasks?inspection_id=eq.{inspection_id}",
+                headers=SERVICE_HEADERS
+            )
+            # Ignore errors if no tasks exist
+            
+            # Insert new tasks
+            for task in tasks:
+                task_data = {
+                    "id": task.get("id") or str(uuid.uuid4()),
+                    "inspection_id": inspection_id,
+                    "name": task.get("name", ""),
+                    "completed": task.get("completed", False),
+                }
+                task_resp = requests.post(
+                    f"{REST_URL}/inspection_tasks",
+                    headers=SERVICE_HEADERS,
+                    json=task_data
+                )
+                task_resp.raise_for_status()
+        
+        # Return the created/updated inspection with tasks
+        return {
+            "id": inspection_id,
+            "orderId": order_id,
+            "unitNumber": inspection_data["unit_number"],
+            "guestName": inspection_data["guest_name"],
+            "departureDate": inspection_data["departure_date"],
+            "status": inspection_data["status"],
+            "tasks": tasks,
+        }
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating/updating inspection: {str(e)}")
+
+@app.patch("/api/inspections/{inspection_id}/tasks/{task_id}")
+def update_inspection_task(inspection_id: str, task_id: str, payload: dict):
+    """Update a single inspection task (e.g., toggle completion)"""
+    try:
+        task_data = {}
+        if "completed" in payload:
+            task_data["completed"] = payload["completed"]
+        if "name" in payload:
+            task_data["name"] = payload["name"]
+        
+        if not task_data:
+            return {"message": "No changes provided"}
+        
+        resp = requests.patch(
+            f"{REST_URL}/inspection_tasks?id=eq.{task_id}&inspection_id=eq.{inspection_id}",
+            headers={**SERVICE_HEADERS, "Prefer": "return=representation"},
+            json=task_data
+        )
+        resp.raise_for_status()
+        
+        result = resp.json()
+        updated_task = result[0] if isinstance(result, list) and result else result
+        
+        return {
+            "id": updated_task.get("id"),
+            "name": updated_task.get("name"),
+            "completed": updated_task.get("completed", False),
+        }
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating inspection task: {str(e)}")
 
 @app.get("/inventory/items")
 def inventory_items():

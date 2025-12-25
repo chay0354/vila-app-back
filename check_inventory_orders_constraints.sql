@@ -17,3 +17,8 @@ FROM information_schema.columns
 WHERE table_name = 'inventory_orders'
 ORDER BY ordinal_position;
 
+
+
+
+
+
