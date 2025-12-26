@@ -22,6 +22,14 @@ BEGIN
     END IF;
 END $$;
 
--- Update existing users to have default role if null
-UPDATE users SET role = 'עובד תחזוקה' WHERE role IS NULL;
+-- Update existing users to have default role if null (only if column exists)
+DO $$ 
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'users' AND column_name = 'role'
+    ) THEN
+        UPDATE users SET role = 'עובד תחזוקה' WHERE role IS NULL;
+    END IF;
+END $$;
 

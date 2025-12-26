@@ -512,8 +512,9 @@ def sync_inspections_with_orders():
                     orders_by_date[departure_date] = []
                 orders_by_date[departure_date].append(order)
         
-        # Get existing inspection dates
+        # Get existing inspection dates and their IDs
         existing_dates = {insp.get("departure_date") for insp in existing_inspections if insp.get("departure_date")}
+        existing_inspections_by_date = {insp.get("departure_date"): insp.get("id") for insp in existing_inspections if insp.get("departure_date")}
         
         # Create inspections for missing departure dates
         for departure_date, orders_for_date in orders_by_date.items():
@@ -528,10 +529,24 @@ def sync_inspections_with_orders():
                     ", ".join(guest_names)
                 )
         
-        # Update inspections for dates that changed (if order departure_date was edited)
-        # This is handled by the order update endpoint
+        # Remove inspections for departure dates that no longer have orders
+        orders_dates = set(orders_by_date.keys())
+        for inspection in existing_inspections:
+            inspection_date = inspection.get("departure_date")
+            if inspection_date and inspection_date not in orders_dates:
+                # This departure date no longer has any orders, delete the inspection
+                inspection_id = inspection.get("id")
+                try:
+                    delete_resp = requests.delete(
+                        f"{REST_URL}/inspections?id=eq.{inspection_id}",
+                        headers=SERVICE_HEADERS
+                    )
+                    if delete_resp.status_code in [200, 204]:
+                        print(f"Deleted orphaned inspection {inspection_id} for departure date {inspection_date}")
+                except Exception as e:
+                    print(f"Warning: Error deleting orphaned inspection {inspection_id}: {str(e)}")
         
-        print(f"Synced inspections with orders: {len(orders_by_date)} unique departure dates")
+        print(f"Synced inspections with orders: {len(orders_by_date)} unique departure dates, removed {len(existing_dates) - len(orders_dates)} orphaned inspections")
         
     except Exception as e:
         print(f"Warning: Error syncing inspections with orders: {str(e)}")
@@ -840,25 +855,60 @@ def sync_cleaning_inspections_with_orders():
                 orders_by_date[departure_date] = []
             orders_by_date[departure_date].append(order)
         
+        # Get all existing cleaning inspections
+        cleaning_inspections_resp = requests.get(
+            f"{REST_URL}/cleaning_inspections",
+            headers=SERVICE_HEADERS,
+            params={"select": "id,departure_date"}
+        )
+        
+        existing_cleaning_inspections = []
+        if cleaning_inspections_resp.status_code == 200:
+            existing_cleaning_inspections = cleaning_inspections_resp.json() or []
+        elif cleaning_inspections_resp.status_code == 404:
+            existing_cleaning_inspections = []
+        
+        # Get existing cleaning inspection dates
+        existing_cleaning_dates = {insp.get("departure_date") for insp in existing_cleaning_inspections if insp.get("departure_date")}
+        
         # Create or update cleaning inspections for each departure date
         for departure_date, date_orders in orders_by_date.items():
             if not date_orders:
                 continue
             
-            # Use first order's details
-            first_order = date_orders[0]
-            order_id = first_order.get("id")
-            unit_number = first_order.get("unit_number", "").strip()
-            guest_name = first_order.get("guest_name", "").strip()
-            
-            # Combine guest names if multiple orders
-            if len(date_orders) > 1:
-                guest_names = [o.get("guest_name", "").strip() for o in date_orders if o.get("guest_name", "").strip()]
-                guest_name = ", ".join(set(guest_names))  # Remove duplicates
-            
-            create_cleaning_inspection_for_departure_date(departure_date, order_id, unit_number, guest_name)
+            # Only create if it doesn't exist
+            if departure_date not in existing_cleaning_dates:
+                # Use first order's details
+                first_order = date_orders[0]
+                order_id = first_order.get("id")
+                unit_number = first_order.get("unit_number", "").strip()
+                guest_name = first_order.get("guest_name", "").strip()
+                
+                # Combine guest names if multiple orders
+                if len(date_orders) > 1:
+                    guest_names = [o.get("guest_name", "").strip() for o in date_orders if o.get("guest_name", "").strip()]
+                    guest_name = ", ".join(set(guest_names))  # Remove duplicates
+                
+                create_cleaning_inspection_for_departure_date(departure_date, order_id, unit_number, guest_name)
         
-        print(f"Synced cleaning inspections with {len(orders)} orders")
+        # Remove cleaning inspections for departure dates that no longer have orders
+        orders_dates = set(orders_by_date.keys())
+        for inspection in existing_cleaning_inspections:
+            inspection_date = inspection.get("departure_date")
+            if inspection_date and inspection_date not in orders_dates:
+                # This departure date no longer has any orders, delete the cleaning inspection
+                inspection_id = inspection.get("id")
+                try:
+                    delete_resp = requests.delete(
+                        f"{REST_URL}/cleaning_inspections?id=eq.{inspection_id}",
+                        headers=SERVICE_HEADERS
+                    )
+                    if delete_resp.status_code in [200, 204]:
+                        print(f"Deleted orphaned cleaning inspection {inspection_id} for departure date {inspection_date}")
+                except Exception as e:
+                    print(f"Warning: Error deleting orphaned cleaning inspection {inspection_id}: {str(e)}")
+        
+        print(f"Synced cleaning inspections with {len(orders)} orders: {len(orders_by_date)} unique departure dates, removed {len(existing_cleaning_dates) - len(orders_dates)} orphaned cleaning inspections")
     except Exception as e:
         print(f"Error syncing cleaning inspections with orders: {str(e)}")
 
