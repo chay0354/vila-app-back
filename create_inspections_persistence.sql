@@ -41,3 +41,4 @@ CREATE POLICY "anon delete inspection_tasks" ON inspection_tasks FOR DELETE TO a
 
 
 
+

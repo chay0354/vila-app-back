@@ -55,3 +55,4 @@ CREATE INDEX IF NOT EXISTS idx_monthly_inspections_month ON monthly_inspections(
 CREATE INDEX IF NOT EXISTS idx_monthly_inspections_unit ON monthly_inspections(unit_number);
 CREATE INDEX IF NOT EXISTS idx_monthly_inspection_tasks_inspection_id ON monthly_inspection_tasks(inspection_id);
 
+

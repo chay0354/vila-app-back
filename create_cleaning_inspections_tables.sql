@@ -56,3 +56,4 @@ CREATE INDEX IF NOT EXISTS idx_cleaning_inspections_departure_date ON cleaning_i
 CREATE INDEX IF NOT EXISTS idx_cleaning_inspections_order_id ON cleaning_inspections(order_id);
 CREATE INDEX IF NOT EXISTS idx_cleaning_inspection_tasks_inspection_id ON cleaning_inspection_tasks(inspection_id);
 
+

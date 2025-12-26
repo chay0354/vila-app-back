@@ -6,6 +6,7 @@ import os
 import requests
 import bcrypt
 import base64
+import json
 from datetime import datetime
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -2491,13 +2492,40 @@ def reports_summary():
         orders_resp.raise_for_status()
         orders = orders_resp.json() or []
         
-        expenses_resp = requests.get(f"{REST_URL}/expenses", headers=SERVICE_HEADERS, params={"select": "amount"})
-        expenses_resp.raise_for_status()
-        expenses = expenses_resp.json() or []
+        # Calculate expenses from invoices instead of expenses table
+        total_expenses = 0
+        try:
+            invoices_resp = requests.get(f"{REST_URL}/invoices", headers=SERVICE_HEADERS, params={"select": "total_price,extracted_data"})
+            invoices_resp.raise_for_status()
+            invoices = invoices_resp.json() or []
+            
+            for invoice in invoices:
+                amount = 0
+                # Try to get amount from extracted_data first (simplified schema)
+                extracted_data = invoice.get("extracted_data")
+                if extracted_data:
+                    if isinstance(extracted_data, str):
+                        try:
+                            extracted_data = json.loads(extracted_data)
+                        except:
+                            extracted_data = None
+                    if isinstance(extracted_data, dict):
+                        amount = extracted_data.get("total_price") or 0
+                
+                # Fallback to invoice-level total_price
+                if not amount:
+                    amount = invoice.get("total_price") or 0
+                
+                if amount:
+                    try:
+                        total_expenses += float(amount) if amount else 0
+                    except (ValueError, TypeError):
+                        pass
+        except Exception as e:
+            print(f"Warning: Could not fetch invoices for expenses calculation: {e}")
         
         total_revenue = sum((o.get("total_amount") or 0) for o in orders)
         total_paid = sum((o.get("paid_amount") or 0) for o in orders)
-        total_expenses = sum((e.get("amount") or 0) for e in expenses)
         return {"totalRevenue": total_revenue, "totalPaid": total_paid, "totalExpenses": total_expenses}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching reports summary: {str(e)}")
