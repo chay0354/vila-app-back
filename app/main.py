@@ -438,11 +438,14 @@ def sync_inspections_with_orders():
         elif inspections_resp.status_code == 404:
             existing_inspections = []
         
-        # Group orders by departure date
+        # Group orders by departure date, filtering out orders with empty unit_number or guest_name
         orders_by_date = {}
         for order in orders:
             departure_date = order.get("departure_date")
-            if departure_date and order.get("status") != "בוטל":
+            unit_number = order.get("unit_number", "").strip() if order.get("unit_number") else ""
+            guest_name = order.get("guest_name", "").strip() if order.get("guest_name") else ""
+            
+            if departure_date and order.get("status") != "בוטל" and unit_number and guest_name:
                 if departure_date not in orders_by_date:
                     orders_by_date[departure_date] = []
                 orders_by_date[departure_date].append(order)
@@ -455,11 +458,12 @@ def sync_inspections_with_orders():
             if departure_date not in existing_dates:
                 # Create inspection for this departure date
                 first_order = orders_for_date[0]
+                guest_names = [o.get("guest_name", "").strip() for o in orders_for_date if o.get("guest_name", "").strip()]
                 create_inspection_for_departure_date(
                     departure_date,
                     first_order.get("id"),
-                    first_order.get("unit_number", ""),
-                    ", ".join([o.get("guest_name", "") for o in orders_for_date])
+                    first_order.get("unit_number", "").strip(),
+                    ", ".join(guest_names)
                 )
         
         # Update inspections for dates that changed (if order departure_date was edited)
@@ -502,6 +506,11 @@ def update_inspection_for_departure_date(old_date: str, new_date: str, order_id:
 def create_inspection_for_departure_date(departure_date: str, order_id: str, unit_number: str, guest_name: str):
     """Create an inspection for a departure date if one doesn't already exist"""
     if not departure_date:
+        return None
+    
+    # Don't create inspection if unit_number or guest_name are empty
+    if not unit_number or not unit_number.strip() or not guest_name or not guest_name.strip():
+        print(f"Skipping inspection creation for {departure_date}: unit_number or guest_name is empty")
         return None
     
     try:
