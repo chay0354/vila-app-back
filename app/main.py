@@ -996,6 +996,23 @@ def delete_order(order_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.delete("/api/orders/{order_id}")
+def api_delete_order(order_id: str):
+    """Delete an order - API endpoint for frontend"""
+    try:
+        resp = requests.delete(
+            f"{REST_URL}/orders",
+            headers=SERVICE_HEADERS,
+            params={"id": f"eq.{order_id}"},
+        )
+        resp.raise_for_status()
+        return JSONResponse(content={"message": "Deleted successfully"}, status_code=200)
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting order: {str(e)}")
+
 @app.get("/inspections")
 def inspections():
     """Get all inspections with their tasks"""
