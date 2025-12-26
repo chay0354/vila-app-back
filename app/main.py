@@ -471,6 +471,30 @@ DEFAULT_CLEANING_INSPECTION_TASKS = [
     {"id": "31", "name": "להעביר סמרטוט על הפחים ולשים שקיות", "completed": False},
 ]
 
+# Default monthly inspection tasks - for monthly inspections
+DEFAULT_MONTHLY_INSPECTION_TASKS = [
+    {"id": "1", "name": "בדיקת תקינות מערכות חשמל", "completed": False},
+    {"id": "2", "name": "בדיקת תקינות מערכות מים", "completed": False},
+    {"id": "3", "name": "בדיקת תקינות מערכות גז", "completed": False},
+    {"id": "4", "name": "בדיקת תקינות מזגנים", "completed": False},
+    {"id": "5", "name": "בדיקת תקינות דודי שמש", "completed": False},
+    {"id": "6", "name": "בדיקת תקינות מערכות אבטחה", "completed": False},
+    {"id": "7", "name": "בדיקת תקינות מערכות תאורה", "completed": False},
+    {"id": "8", "name": "בדיקת תקינות דלתות וחלונות", "completed": False},
+    {"id": "9", "name": "בדיקת תקינות ריהוט וציוד", "completed": False},
+    {"id": "10", "name": "בדיקת תקינות מערכות ניקוז", "completed": False},
+    {"id": "11", "name": "בדיקת תקינות מערכות אוורור", "completed": False},
+    {"id": "12", "name": "בדיקת תקינות מערכות כיבוי אש", "completed": False},
+    {"id": "13", "name": "בדיקת תקינות מערכות אינטרנט", "completed": False},
+    {"id": "14", "name": "בדיקת תקינות מערכות טלוויזיה", "completed": False},
+    {"id": "15", "name": "בדיקת תקינות מערכות מיזוג", "completed": False},
+    {"id": "16", "name": "בדיקת תקינות מערכות מים חמים", "completed": False},
+    {"id": "17", "name": "בדיקת תקינות מערכות תאורה חוץ", "completed": False},
+    {"id": "18", "name": "בדיקת תקינות מערכות השקיה", "completed": False},
+    {"id": "19", "name": "בדיקת תקינות מערכות בריכה", "completed": False},
+    {"id": "20", "name": "בדיקת תקינות מערכות גקוזי", "completed": False},
+]
+
 def sync_inspections_with_orders():
     """Sync inspections table with all orders - ensure every departure date has an inspection"""
     try:
@@ -3513,4 +3537,402 @@ def delete_cleaning_schedule_entry(entry_id: str):
         raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting cleaning schedule entry: {str(e)}")
+
+# Monthly Inspections Endpoints
+def sync_monthly_inspections():
+    """Sync monthly inspections - ensure each hotel has an inspection for current month and next month"""
+    try:
+        from datetime import date
+        from calendar import monthrange
+        
+        # Get current month and next month (first day of each month)
+        today = date.today()
+        current_month = date(today.year, today.month, 1)
+        
+        # Calculate next month
+        if today.month == 12:
+            next_month = date(today.year + 1, 1, 1)
+        else:
+            next_month = date(today.year, today.month + 1, 1)
+        
+        months_to_sync = [current_month, next_month]
+        
+        # List of all hotels/units (from UNIT_CATEGORIES)
+        UNIT_NAMES = [
+            'צימרים כלנית ריזורט',
+            'וילה ויקטוריה',
+            'וילה כלנית',
+            'וילה ממלכת אהרון',
+            'וילה בוטיק אהרון',
+            'וילה אירופה',
+            'וילאה 1',
+            'וילאה 2',
+            'לה כינרה',
+            'הודולה 1',
+            'הודולה 2',
+            'הודולה 3',
+            'הודולה 4',
+            'הודולה 5',
+            'בית קונפיטה',
+        ]
+        
+        # Get all existing monthly inspections
+        existing_resp = requests.get(
+            f"{REST_URL}/monthly_inspections",
+            headers=SERVICE_HEADERS,
+            params={"select": "id,unit_number,inspection_month"}
+        )
+        
+        existing_inspections = []
+        if existing_resp.status_code == 200:
+            existing_inspections = existing_resp.json() or []
+            print(f"Found {len(existing_inspections)} existing monthly inspections")
+        elif existing_resp.status_code == 404:
+            print("WARNING: monthly_inspections table returned 404 - table may not exist")
+            existing_inspections = []
+        else:
+            print(f"WARNING: Failed to get existing monthly inspections: {existing_resp.status_code} {existing_resp.text[:200]}")
+            existing_inspections = []
+        
+        # Create a set of (unit_number, inspection_month) tuples for existing inspections
+        existing_keys = set()
+        for insp in existing_inspections:
+            unit = insp.get("unit_number", "").strip()
+            month = insp.get("inspection_month")
+            if unit and month:
+                existing_keys.add((unit, month))
+        
+        # Create inspections for each hotel and month combination
+        created_count = 0
+        for unit_number in UNIT_NAMES:
+            for inspection_month in months_to_sync:
+                month_str = inspection_month.isoformat()
+                key = (unit_number, month_str)
+                
+                if key not in existing_keys:
+                    # Create new monthly inspection
+                    inspection_id = f"MONTHLY-{unit_number.replace(' ', '-')}-{month_str}"
+                    
+                    inspection_data = {
+                        "id": inspection_id,
+                        "unit_number": unit_number,
+                        "inspection_month": month_str,
+                        "status": "זמן הביקורות טרם הגיע",
+                    }
+                    
+                    try:
+                        create_resp = requests.post(
+                            f"{REST_URL}/monthly_inspections",
+                            headers=SERVICE_HEADERS,
+                            json=inspection_data
+                        )
+                        if create_resp.status_code in [200, 201]:
+                            created_count += 1
+                            print(f"Created monthly inspection {inspection_id} for {unit_number} on {month_str}")
+                            
+                            # Create default tasks for this inspection
+                            for task in DEFAULT_MONTHLY_INSPECTION_TASKS:
+                                task_data = {
+                                    "id": task["id"],
+                                    "inspection_id": inspection_id,
+                                    "name": task["name"],
+                                    "completed": False,
+                                }
+                                try:
+                                    task_resp = requests.post(
+                                        f"{REST_URL}/monthly_inspection_tasks",
+                                        headers=SERVICE_HEADERS,
+                                        json=task_data
+                                    )
+                                    if task_resp.status_code not in [200, 201, 409]:
+                                        print(f"Warning: Failed to create task {task['id']} for inspection {inspection_id}: {task_resp.status_code} {task_resp.text[:200]}")
+                                except Exception as e:
+                                    print(f"Warning: Error creating task {task['id']} for inspection {inspection_id}: {str(e)}")
+                        elif create_resp.status_code == 409:
+                            # Already exists, that's OK
+                            print(f"Monthly inspection {inspection_id} already exists for {unit_number} on {month_str}")
+                        elif create_resp.status_code == 404:
+                            # Table doesn't exist yet - this is an error, not OK
+                            error_text = create_resp.text[:500] if create_resp.text else "No error text"
+                            print(f"ERROR: monthly_inspections table does not exist! Please run create_monthly_inspections_tables.sql")
+                            print(f"  Response: {error_text}")
+                            # Don't raise - continue with other hotels, but log clearly
+                        else:
+                            error_text = create_resp.text[:500] if create_resp.text else "No error text"
+                            print(f"Warning: Failed to create monthly inspection {inspection_id} for {unit_number} on {month_str}: {create_resp.status_code}")
+                            print(f"  Error: {error_text}")
+                    except Exception as e:
+                        print(f"Exception creating monthly inspection for {unit_number} on {month_str}: {str(e)}")
+                        import traceback
+                        traceback.print_exc()
+                        # Don't raise - continue with other hotels
+        
+        # Remove inspections for months that are not current or next
+        months_to_keep = {m.isoformat() for m in months_to_sync}
+        removed_count = 0
+        for insp in existing_inspections:
+            month = insp.get("inspection_month")
+            if month and month not in months_to_keep:
+                inspection_id = insp.get("id")
+                try:
+                    delete_resp = requests.delete(
+                        f"{REST_URL}/monthly_inspections?id=eq.{inspection_id}",
+                        headers=SERVICE_HEADERS
+                    )
+                    if delete_resp.status_code in [200, 204]:
+                        removed_count += 1
+                        print(f"Removed old monthly inspection {inspection_id} for month {month}")
+                except Exception as e:
+                    print(f"Warning: Error removing old monthly inspection {inspection_id}: {str(e)}")
+        
+        print(f"Synced monthly inspections: created {created_count}, removed {removed_count} for {len(UNIT_NAMES)} hotels across {len(months_to_sync)} months")
+        print(f"Expected: {len(UNIT_NAMES) * len(months_to_sync)} total inspections ({len(UNIT_NAMES)} hotels × {len(months_to_sync)} months)")
+        if created_count == 0 and len(existing_inspections) == 0:
+            print("WARNING: No inspections were created and none exist. Check if table exists and sync logic.")
+    except Exception as e:
+        print(f"ERROR syncing monthly inspections: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
+@app.get("/api/monthly-inspections")
+def get_monthly_inspections():
+    """Get all monthly inspections"""
+    try:
+        print("GET /api/monthly-inspections - Starting sync...")
+        sync_monthly_inspections()  # Sync before returning
+        print("GET /api/monthly-inspections - Sync completed, fetching inspections...")
+        resp = requests.get(
+            f"{REST_URL}/monthly_inspections",
+            headers=SERVICE_HEADERS,
+            params={"select": "*,monthly_inspection_tasks(*)", "order": "inspection_month.asc,unit_number.asc"}
+        )
+        if resp.status_code == 404:
+            print("WARNING: monthly_inspections table returned 404 - table may not exist")
+            return []
+        resp.raise_for_status()
+        inspections = resp.json() or []
+        print(f"GET /api/monthly-inspections - Found {len(inspections)} inspections in database")
+        
+        # Format response similar to regular inspections
+        result = []
+        for insp in inspections:
+            tasks = insp.get("monthly_inspection_tasks", [])
+            result.append({
+                "id": insp.get("id"),
+                "unitNumber": insp.get("unit_number"),
+                "inspectionMonth": insp.get("inspection_month"),
+                "status": insp.get("status", "זמן הביקורות טרם הגיע"),
+                "tasks": [{"id": t.get("id"), "name": t.get("name"), "completed": t.get("completed", False)} for t in tasks],
+            })
+        print(f"GET /api/monthly-inspections - Returning {len(result)} formatted inspections")
+        return result
+    except requests.exceptions.HTTPError as e:
+        if e.response and e.response.status_code == 404:
+            print("ERROR: monthly_inspections table not found (404)")
+            return []
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        print(f"ERROR fetching monthly inspections: {error_detail}")
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        print(f"ERROR in get_monthly_inspections: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error fetching monthly inspections: {str(e)}")
+
+@app.post("/api/monthly-inspections/sync")
+def sync_monthly_inspections_endpoint():
+    """Sync monthly inspections with hotels"""
+    try:
+        sync_monthly_inspections()
+        return {"message": "Monthly inspections synced successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error syncing monthly inspections: {str(e)}")
+
+@app.post("/api/monthly-inspections")
+def create_monthly_inspection(payload: dict):
+    """Create or update a monthly inspection mission with its tasks"""
+    try:
+        inspection_id = payload.get("id") or str(uuid.uuid4())
+        
+        # Create or update monthly inspection
+        inspection_data = {
+            "id": inspection_id,
+            "unit_number": payload.get("unitNumber") or payload.get("unit_number", ""),
+            "inspection_month": payload.get("inspectionMonth") or payload.get("inspection_month", ""),
+            "status": payload.get("status", "זמן הביקורות טרם הגיע"),
+        }
+        
+        # Check if monthly inspection exists
+        existing = []
+        try:
+            check_resp = requests.get(
+                f"{REST_URL}/monthly_inspections",
+                headers=SERVICE_HEADERS,
+                params={"id": f"eq.{inspection_id}", "select": "id"}
+            )
+            if check_resp.status_code == 404:
+                existing = []
+            else:
+                check_resp.raise_for_status()
+                existing = check_resp.json() or []
+        except requests.exceptions.HTTPError as e:
+            if e.response and e.response.status_code == 404:
+                existing = []
+            else:
+                raise
+        except Exception:
+            existing = []
+        
+        if existing and len(existing) > 0:
+            # Update existing monthly inspection
+            try:
+                update_resp = requests.patch(
+                    f"{REST_URL}/monthly_inspections?id=eq.{inspection_id}",
+                    headers={**SERVICE_HEADERS, "Prefer": "return=representation"},
+                    json=inspection_data
+                )
+                if update_resp.status_code != 404:
+                    update_resp.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                if e.response and e.response.status_code == 404:
+                    pass
+                else:
+                    raise
+        else:
+            # Create new monthly inspection
+            try:
+                create_resp = requests.post(
+                    f"{REST_URL}/monthly_inspections",
+                    headers=SERVICE_HEADERS,
+                    json=inspection_data
+                )
+                if create_resp.status_code not in [200, 201, 404, 409]:
+                    create_resp.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                if e.response and e.response.status_code in [404, 409]:
+                    pass
+                else:
+                    raise
+        
+        # Handle tasks - upsert
+        tasks = payload.get("tasks", [])
+        saved_tasks = []
+        failed_tasks = []
+        
+        if tasks:
+            # Get existing tasks for this monthly inspection
+            existing_task_ids = set()
+            try:
+                existing_resp = requests.get(
+                    f"{REST_URL}/monthly_inspection_tasks",
+                    headers=SERVICE_HEADERS,
+                    params={"inspection_id": f"eq.{inspection_id}", "select": "id,name"}
+                )
+                if existing_resp.status_code == 200:
+                    existing_tasks = existing_resp.json() or []
+                    existing_task_ids = {t.get("id") for t in existing_tasks if t.get("id")}
+            except Exception:
+                pass
+            
+            # Upsert tasks
+            for task in tasks:
+                try:
+                    completed = task.get("completed", False)
+                    if isinstance(completed, str):
+                        completed = completed.lower() in ('true', '1', 'yes', 'on')
+                    elif completed is None:
+                        completed = False
+                    else:
+                        completed = bool(completed)
+                    
+                    task_data = {
+                        "id": task.get("id") or str(uuid.uuid4()),
+                        "inspection_id": inspection_id,
+                        "name": task.get("name", ""),
+                        "completed": completed,
+                    }
+                    task_id = task_data["id"]
+                    task_exists = task_id in existing_task_ids
+                    
+                    if task_exists:
+                        update_resp = requests.patch(
+                            f"{REST_URL}/monthly_inspection_tasks?id=eq.{task_id}&inspection_id=eq.{inspection_id}",
+                            headers={**SERVICE_HEADERS, "Prefer": "return=representation"},
+                            json={"completed": task_data["completed"], "name": task_data["name"]}
+                        )
+                        if update_resp.status_code in [200, 201, 204]:
+                            saved_tasks.append(task_data)
+                        else:
+                            task_resp = requests.post(
+                                f"{REST_URL}/monthly_inspection_tasks",
+                                headers=SERVICE_HEADERS,
+                                json=task_data
+                            )
+                            if task_resp.status_code in [200, 201]:
+                                saved_tasks.append(task_data)
+                            else:
+                                failed_tasks.append(task_data)
+                    else:
+                        task_resp = requests.post(
+                            f"{REST_URL}/monthly_inspection_tasks",
+                            headers=SERVICE_HEADERS,
+                            json=task_data
+                        )
+                        if task_resp.status_code in [200, 201]:
+                            saved_tasks.append(task_data)
+                        elif task_resp.status_code == 409:
+                            # Conflict - try update
+                            try:
+                                update_resp = requests.patch(
+                                    f"{REST_URL}/monthly_inspection_tasks?id=eq.{task_id}&inspection_id=eq.{inspection_id}",
+                                    headers={**SERVICE_HEADERS, "Prefer": "return=representation"},
+                                    json={"completed": task_data["completed"], "name": task_data["name"]}
+                                )
+                                if update_resp.status_code in [200, 201, 204]:
+                                    saved_tasks.append(task_data)
+                                else:
+                                    failed_tasks.append(task_data)
+                            except Exception:
+                                failed_tasks.append(task_data)
+                        else:
+                            failed_tasks.append(task_data)
+                except Exception as e:
+                    print(f"Error saving monthly inspection task: {str(e)}")
+                    failed_tasks.append(task_data)
+        
+        # Get updated inspection with tasks
+        get_resp = requests.get(
+            f"{REST_URL}/monthly_inspections",
+            headers=SERVICE_HEADERS,
+            params={"id": f"eq.{inspection_id}", "select": "*,monthly_inspection_tasks(*)"}
+        )
+        
+        if get_resp.status_code == 200:
+            inspections = get_resp.json() or []
+            if inspections:
+                insp = inspections[0]
+                tasks = insp.get("monthly_inspection_tasks", [])
+                return {
+                    "id": insp.get("id"),
+                    "unitNumber": insp.get("unit_number"),
+                    "inspectionMonth": insp.get("inspection_month"),
+                    "status": insp.get("status"),
+                    "tasks": [{"id": t.get("id"), "name": t.get("name"), "completed": t.get("completed", False)} for t in tasks],
+                    "savedTasksCount": len(saved_tasks),
+                    "failedTasksCount": len(failed_tasks),
+                    "totalTasksCount": len(tasks),
+                    "completedTasksCount": sum(1 for t in tasks if t.get("completed", False)),
+                }
+        
+        return {
+            "id": inspection_id,
+            "tasks": saved_tasks,
+            "savedTasksCount": len(saved_tasks),
+            "failedTasksCount": len(failed_tasks),
+        }
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error saving monthly inspection: {str(e)}")
 
