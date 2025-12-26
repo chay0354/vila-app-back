@@ -19,3 +19,4 @@ ALTER TABLE inspection_tasks ADD PRIMARY KEY (id, inspection_id);
 
 
 
+

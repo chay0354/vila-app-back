@@ -47,6 +47,8 @@ def health():
 class SignUpRequest(BaseModel):
     username: str
     password: str
+    role: Optional[str] = "עובד תחזוקה"
+    image_url: Optional[str] = None
 
 class SignInRequest(BaseModel):
     username: str
@@ -78,7 +80,9 @@ def signup(payload: SignUpRequest):
         user_data = {
             "id": str(uuid.uuid4()),
             "username": payload.username,
-            "password_hash": password_hash
+            "password_hash": password_hash,
+            "role": payload.role or "עובד תחזוקה",
+            "image_url": payload.image_url
         }
         
         resp = requests.post(
@@ -98,6 +102,8 @@ def signup(payload: SignUpRequest):
         return {
             "id": user.get("id"),
             "username": user.get("username"),
+            "role": user.get("role", "עובד תחזוקה"),
+            "image_url": user.get("image_url"),
             "message": "User created successfully"
         }
     except HTTPException:
@@ -140,6 +146,8 @@ def signin(payload: SignInRequest):
         return {
             "id": user.get("id"),
             "username": user.get("username"),
+            "role": user.get("role", "עובד תחזוקה"),
+            "image_url": user.get("image_url"),
             "message": "Sign in successful"
         }
     except HTTPException:
@@ -325,9 +333,24 @@ def api_update_order(order_id: str, payload: dict):
                 unit_number,
                 guest_name
             )
+            # Also update cleaning inspection
+            update_cleaning_inspection_for_departure_date(
+                old_departure_date,
+                new_departure_date,
+                order_id,
+                unit_number,
+                guest_name
+            )
         else:
             # Just ensure inspection exists for this date
             create_inspection_for_departure_date(
+                new_departure_date,
+                order_id,
+                unit_number,
+                guest_name
+            )
+            # Also ensure cleaning inspection exists
+            create_cleaning_inspection_for_departure_date(
                 new_departure_date,
                 order_id,
                 unit_number,
@@ -381,7 +404,7 @@ def create_order(payload: OrderCreate):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating order: {str(e)}")
 
-# Default inspection tasks (24 tasks)
+# Default inspection tasks (24 tasks) - for exit inspections
 DEFAULT_INSPECTION_TASKS = [
     {"id": "1", "name": "לשים כלור בבריכה", "completed": False},
     {"id": "2", "name": "להוסיף מים בבריכה", "completed": False},
@@ -407,6 +430,45 @@ DEFAULT_INSPECTION_TASKS = [
     {"id": "22", "name": "לבדוק תקינות חדרים", "completed": False},
     {"id": "23", "name": "כיבוי אורות פנים וחוץ הוילה", "completed": False},
     {"id": "24", "name": "לנעול דלת ראשית", "completed": False},
+]
+
+# Default cleaning inspection tasks - for cleaning inspections
+DEFAULT_CLEANING_INSPECTION_TASKS = [
+    # מטבח (Kitchen)
+    {"id": "1", "name": "מכונת קפה, לנקות ולהחליף פילטר קפה", "completed": False},
+    {"id": "2", "name": "קפה תה סוכר וכו׳", "completed": False},
+    {"id": "3", "name": "להעביר סמרטוט במתקן מים", "completed": False},
+    {"id": "4", "name": "מקרר – בפנים ובחוץ", "completed": False},
+    {"id": "5", "name": "תנור – בפנים ובחוץ", "completed": False},
+    {"id": "6", "name": "כיריים וגריל", "completed": False},
+    {"id": "7", "name": "מיקרו", "completed": False},
+    {"id": "8", "name": "כיור", "completed": False},
+    {"id": "9", "name": "כלים – לשטוף ליבש ולהחזיר לארון", "completed": False},
+    {"id": "10", "name": "לבדוק שכל הכלים נקיים", "completed": False},
+    {"id": "11", "name": "לבדוק שיש לפחות 20 כוסות אוכל מכל דבר", "completed": False},
+    {"id": "12", "name": "ארונות מטבח – לפתוח ולראות שאין דברים להוציא דברים לא קשורים", "completed": False},
+    {"id": "13", "name": "להעביר סמרטוט על הדלתות מטבח בחוץ", "completed": False},
+    {"id": "14", "name": "להעביר סמרטוט על הפח ולראות שנקי", "completed": False},
+    {"id": "15", "name": "פלטת שבת ומיחם מים חמים – לראות שאין אבן", "completed": False},
+    {"id": "16", "name": "סכו״ם, כלים, סמרטוט, סקוֹץ׳ חדשים לאורחים", "completed": False},
+    {"id": "17", "name": "סבון", "completed": False},
+    # סלון (Living Room)
+    {"id": "18", "name": "סלון שטיפה יסודית גם מתחת לספות ולשולחן, להזיז כורסאות ולבדוק שאין פירורים של אוכל", "completed": False},
+    {"id": "19", "name": "שולחן אוכל וספסלים (לנקות בשפריצר ולהעביר סמרטוט)", "completed": False},
+    {"id": "20", "name": "סלון – לנגב אבק ולהעביר סמרטוט גם על הספה. כיריות לנקות לסדר יפה", "completed": False},
+    {"id": "21", "name": "שולחן אוכל וספסלים – להעביר סמרטוט נקי עם תריס", "completed": False},
+    {"id": "22", "name": "חלונות ותריסים – עם ספריי חלונות וסמרטוט נקי. שלא יהיו סימנים. מסילות לנקות", "completed": False},
+    # מסדרון (Hallway)
+    {"id": "23", "name": "מסדרון – לנגב בחוץ שטיחים. לנקות מסילות בחלונות. לנקות חלונות", "completed": False},
+    # חצר (Yard)
+    {"id": "24", "name": "טיפול ברזים וניקוי", "completed": False},
+    {"id": "25", "name": "להשקות עציצים בכל המתחם", "completed": False},
+    {"id": "26", "name": "פינת מנגל – לרוקן פחים ולנקות רשת, וכל אזור המנגל", "completed": False},
+    {"id": "27", "name": "לנקות דשא ולסדר פינות ישיבה", "completed": False},
+    {"id": "28", "name": "שולחן חוץ – להעביר סמרטוט עם חומר. כיסאות נקיים", "completed": False},
+    {"id": "29", "name": "שטיפה לרצפה בחוץ", "completed": False},
+    {"id": "30", "name": "לרוקן את הפחים, לשים שקית חדשה", "completed": False},
+    {"id": "31", "name": "להעביר סמרטוט על הפחים ולשים שקיות", "completed": False},
 ]
 
 def sync_inspections_with_orders():
@@ -610,6 +672,196 @@ def create_inspection_for_departure_date(departure_date: str, order_id: str, uni
         print(f"Warning: Failed to create inspection for departure date {departure_date}: {str(e)}")
         return None
 
+def create_cleaning_inspection_for_departure_date(departure_date: str, order_id: str, unit_number: str, guest_name: str):
+    """Create a cleaning inspection for a departure date if one doesn't already exist"""
+    if not departure_date:
+        return None
+    
+    # Don't create inspection if unit_number or guest_name are empty
+    if not unit_number or not unit_number.strip() or not guest_name or not guest_name.strip():
+        print(f"Skipping cleaning inspection creation for {departure_date}: unit_number or guest_name is empty")
+        return None
+    
+    try:
+        # Check if cleaning inspection already exists for this departure date
+        check_resp = requests.get(
+            f"{REST_URL}/cleaning_inspections",
+            headers=SERVICE_HEADERS,
+            params={"departure_date": f"eq.{departure_date}", "select": "id,departure_date,unit_number"}
+        )
+        
+        existing_inspections = []
+        if check_resp.status_code == 200:
+            existing_inspections = check_resp.json() or []
+        elif check_resp.status_code == 404:
+            # Table doesn't exist yet, that's OK
+            existing_inspections = []
+        
+        # If inspection already exists for this departure date, update it if needed
+        if existing_inspections and len(existing_inspections) > 0:
+            existing = existing_inspections[0]
+            # Update unit_number and guest_name if they changed
+            if existing.get("unit_number") != unit_number or existing.get("guest_name") != guest_name:
+                update_data = {}
+                if existing.get("unit_number") != unit_number:
+                    update_data["unit_number"] = unit_number
+                if existing.get("guest_name") != guest_name:
+                    # Combine guest names if multiple orders share the date
+                    existing_guests = existing.get("guest_name", "")
+                    if guest_name not in existing_guests:
+                        update_data["guest_name"] = f"{existing_guests}, {guest_name}".strip(", ")
+                    else:
+                        update_data["guest_name"] = existing_guests
+                
+                if update_data:
+                    try:
+                        update_resp = requests.patch(
+                            f"{REST_URL}/cleaning_inspections?id=eq.{existing['id']}",
+                            headers=SERVICE_HEADERS,
+                            json=update_data
+                        )
+                        if update_resp.status_code in [200, 201, 204]:
+                            print(f"Updated cleaning inspection {existing['id']} with new unit/guest info")
+                    except Exception as e:
+                        print(f"Warning: Error updating cleaning inspection: {str(e)}")
+            
+            return existing
+        
+        # Create new cleaning inspection for this departure date
+        inspection_id = f"CLEAN-{departure_date}"
+        inspection_data = {
+            "id": inspection_id,
+            "order_id": order_id,  # Keep first order ID for reference
+            "unit_number": unit_number,
+            "guest_name": guest_name,
+            "departure_date": departure_date,
+            "status": "זמן הביקורות טרם הגיע",
+        }
+        
+        # Create cleaning inspection
+        create_resp = requests.post(
+            f"{REST_URL}/cleaning_inspections",
+            headers=SERVICE_HEADERS,
+            json=inspection_data
+        )
+        
+        if create_resp.status_code not in [200, 201, 404, 409]:
+            # If not 404 (table doesn't exist) or 409 (conflict), log error but don't fail
+            if create_resp.status_code != 404 and create_resp.status_code != 409:
+                print(f"Warning: Failed to create cleaning inspection for departure date {departure_date}: {create_resp.status_code}")
+        
+        # Create all default tasks for this cleaning inspection
+        for task in DEFAULT_CLEANING_INSPECTION_TASKS:
+            task_data = {
+                "id": task["id"],
+                "inspection_id": inspection_id,
+                "name": task["name"],
+                "completed": task["completed"],
+            }
+            
+            try:
+                task_resp = requests.post(
+                    f"{REST_URL}/cleaning_inspection_tasks",
+                    headers=SERVICE_HEADERS,
+                    json=task_data
+                )
+                # Ignore 404 (table doesn't exist) and 409 (task already exists)
+                if task_resp.status_code not in [200, 201, 404, 409]:
+                    print(f"Warning: Failed to create cleaning task {task['id']} for inspection {inspection_id}: {task_resp.status_code}")
+            except Exception as e:
+                print(f"Warning: Exception creating cleaning task {task['id']}: {str(e)}")
+        
+        print(f"Created cleaning inspection {inspection_id} for departure date {departure_date}")
+        return inspection_data
+        
+    except Exception as e:
+        # Don't fail order creation if cleaning inspection creation fails
+        print(f"Warning: Failed to create cleaning inspection for departure date {departure_date}: {str(e)}")
+        return None
+
+def update_cleaning_inspection_for_departure_date(old_departure_date: str, new_departure_date: str, order_id: str, unit_number: str, guest_name: str):
+    """Update cleaning inspection when departure date changes"""
+    if not new_departure_date:
+        return None
+    
+    try:
+        # Delete old cleaning inspection if departure date changed
+        if old_departure_date and old_departure_date != new_departure_date:
+            old_inspection_id = f"CLEAN-{old_departure_date}"
+            try:
+                delete_resp = requests.delete(
+                    f"{REST_URL}/cleaning_inspections?id=eq.{old_inspection_id}",
+                    headers=SERVICE_HEADERS
+                )
+                if delete_resp.status_code in [200, 204]:
+                    print(f"Deleted old cleaning inspection {old_inspection_id} due to departure date change")
+            except Exception as e:
+                print(f"Warning: Error deleting old cleaning inspection: {str(e)}")
+        
+        # Create new cleaning inspection for new departure date
+        return create_cleaning_inspection_for_departure_date(new_departure_date, order_id, unit_number, guest_name)
+    except Exception as e:
+        print(f"Warning: Error updating cleaning inspection for departure date change: {str(e)}")
+        return None
+
+def sync_cleaning_inspections_with_orders():
+    """Sync cleaning inspections table with all orders - ensure every departure date has a cleaning inspection"""
+    try:
+        # Get all orders
+        orders_resp = requests.get(
+            f"{REST_URL}/orders",
+            headers=SERVICE_HEADERS,
+            params={"select": "id,departure_date,unit_number,guest_name,status"}
+        )
+        
+        if orders_resp.status_code != 200:
+            print(f"Warning: Failed to fetch orders for cleaning inspection sync: {orders_resp.status_code}")
+            return
+        
+        orders = orders_resp.json() or []
+        
+        # Group orders by departure date
+        orders_by_date = {}
+        for order in orders:
+            departure_date = order.get("departure_date")
+            status = order.get("status", "")
+            
+            # Skip cancelled orders
+            if not departure_date or status == "בוטל":
+                continue
+            
+            # Skip orders with empty unit_number or guest_name
+            unit_number = order.get("unit_number", "").strip()
+            guest_name = order.get("guest_name", "").strip()
+            if not unit_number or not guest_name:
+                continue
+            
+            if departure_date not in orders_by_date:
+                orders_by_date[departure_date] = []
+            orders_by_date[departure_date].append(order)
+        
+        # Create or update cleaning inspections for each departure date
+        for departure_date, date_orders in orders_by_date.items():
+            if not date_orders:
+                continue
+            
+            # Use first order's details
+            first_order = date_orders[0]
+            order_id = first_order.get("id")
+            unit_number = first_order.get("unit_number", "").strip()
+            guest_name = first_order.get("guest_name", "").strip()
+            
+            # Combine guest names if multiple orders
+            if len(date_orders) > 1:
+                guest_names = [o.get("guest_name", "").strip() for o in date_orders if o.get("guest_name", "").strip()]
+                guest_name = ", ".join(set(guest_names))  # Remove duplicates
+            
+            create_cleaning_inspection_for_departure_date(departure_date, order_id, unit_number, guest_name)
+        
+        print(f"Synced cleaning inspections with {len(orders)} orders")
+    except Exception as e:
+        print(f"Error syncing cleaning inspections with orders: {str(e)}")
+
 @app.post("/api/orders")
 def api_create_order(payload: dict):
     """Create order with frontend camelCase format"""
@@ -647,6 +899,8 @@ def api_create_order(payload: dict):
         # Only create inspection if order status is not cancelled
         if created_order.get("status") != "בוטל":
             create_inspection_for_departure_date(departure_date, order_id, unit_number, guest_name)
+            # Also create cleaning inspection
+            create_cleaning_inspection_for_departure_date(departure_date, order_id, unit_number, guest_name)
     
     # Return as single object, not array
     if isinstance(result, list):
@@ -1202,6 +1456,461 @@ def update_inspection_task(inspection_id: str, task_id: str, payload: dict):
             "completed": payload.get("completed", False),
         }
 
+# ========== CLEANING INSPECTIONS ENDPOINTS ==========
+# These are completely separate from regular inspections
+
+@app.get("/cleaning-inspections")
+def cleaning_inspections():
+    """Get all cleaning inspections with their tasks"""
+    try:
+        # Get all cleaning inspections
+        inspections_resp = requests.get(
+            f"{REST_URL}/cleaning_inspections",
+            headers=SERVICE_HEADERS,
+            params={"select": "*", "order": "departure_date.desc"}
+        )
+        
+        if inspections_resp.status_code == 404:
+            # Table doesn't exist yet, return empty list
+            return []
+        
+        inspections_resp.raise_for_status()
+        inspections = inspections_resp.json() or []
+        
+        # Get all cleaning inspection tasks
+        tasks_resp = requests.get(
+            f"{REST_URL}/cleaning_inspection_tasks",
+            headers=SERVICE_HEADERS,
+            params={"select": "*"}
+        )
+        
+        tasks = []
+        if tasks_resp.status_code == 200:
+            tasks = tasks_resp.json() or []
+        elif tasks_resp.status_code == 404:
+            # Table doesn't exist yet, that's OK
+            tasks = []
+        
+        # Group tasks by inspection_id
+        tasks_by_inspection = {}
+        for task in tasks:
+            insp_id = task.get("inspection_id")
+            if insp_id:
+                if insp_id not in tasks_by_inspection:
+                    tasks_by_inspection[insp_id] = []
+                tasks_by_inspection[insp_id].append(task)
+        
+        # Combine inspections with their tasks
+        result = []
+        for inspection in inspections:
+            insp_id = inspection.get("id")
+            inspection_with_tasks = inspection.copy()
+            inspection_with_tasks["tasks"] = tasks_by_inspection.get(insp_id, [])
+            result.append(inspection_with_tasks)
+        
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching cleaning inspections: {str(e)}")
+
+@app.get("/api/cleaning-inspections")
+def api_cleaning_inspections():
+    """Alias for /cleaning-inspections to match frontend expectations"""
+    return cleaning_inspections()
+
+@app.post("/api/cleaning-inspections/sync")
+def sync_all_cleaning_inspections():
+    """Sync all cleaning inspections with orders - ensure every departure date has a cleaning inspection"""
+    try:
+        sync_cleaning_inspections_with_orders()
+        return {"status": "success", "message": "Cleaning inspections synced with orders"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error syncing cleaning inspections: {str(e)}")
+
+@app.post("/api/cleaning-inspections")
+def create_cleaning_inspection(payload: dict):
+    """Create or update a cleaning inspection mission with its tasks"""
+    try:
+        inspection_id = payload.get("id") or str(uuid.uuid4())
+        order_id = payload.get("orderId") or payload.get("order_id")
+        
+        # Create or update cleaning inspection
+        inspection_data = {
+            "id": inspection_id,
+            "order_id": order_id,
+            "unit_number": payload.get("unitNumber") or payload.get("unit_number", ""),
+            "guest_name": payload.get("guestName") or payload.get("guest_name", ""),
+            "departure_date": payload.get("departureDate") or payload.get("departure_date", ""),
+            "status": payload.get("status", "זמן הביקורות טרם הגיע"),
+        }
+        
+        # Check if cleaning inspection exists
+        existing = []
+        try:
+            check_resp = requests.get(
+                f"{REST_URL}/cleaning_inspections",
+                headers=SERVICE_HEADERS,
+                params={"id": f"eq.{inspection_id}", "select": "id"}
+            )
+            # If table doesn't exist (404), that's OK - we'll create it
+            if check_resp.status_code == 404:
+                existing = []
+            else:
+                check_resp.raise_for_status()
+                existing = check_resp.json() or []
+        except requests.exceptions.HTTPError as e:
+            # If table doesn't exist, that's OK
+            if e.response and e.response.status_code == 404:
+                existing = []
+            else:
+                raise
+        except Exception:
+            # If any other error, assume inspection doesn't exist
+            existing = []
+        
+        if existing and len(existing) > 0:
+            # Update existing cleaning inspection
+            try:
+                update_resp = requests.patch(
+                    f"{REST_URL}/cleaning_inspections?id=eq.{inspection_id}",
+                    headers={**SERVICE_HEADERS, "Prefer": "return=representation"},
+                    json=inspection_data
+                )
+                # If table doesn't exist (404), that's OK - will be created by migration
+                if update_resp.status_code != 404:
+                    update_resp.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                # If table doesn't exist, that's OK
+                if e.response and e.response.status_code == 404:
+                    pass
+                else:
+                    raise
+        else:
+            # Create new cleaning inspection
+            try:
+                create_resp = requests.post(
+                    f"{REST_URL}/cleaning_inspections",
+                    headers=SERVICE_HEADERS,
+                    json=inspection_data
+                )
+                # If table doesn't exist (404), that's OK - will be created by migration
+                # If inspection already exists (409 or similar), that's also OK
+                if create_resp.status_code not in [200, 201, 404, 409]:
+                    create_resp.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                # If table doesn't exist (404), that's OK
+                if e.response and e.response.status_code == 404:
+                    pass
+                # If conflict (409), inspection might already exist - that's OK
+                elif e.response and e.response.status_code == 409:
+                    pass
+                else:
+                    raise
+        
+        # Handle tasks - use upsert (update or insert) instead of delete + insert
+        tasks = payload.get("tasks", [])
+        return_tasks = tasks  # Default to original tasks if nothing is saved
+        saved_tasks = []
+        failed_tasks = []
+        
+        if tasks:
+            # First, get existing tasks for this cleaning inspection
+            existing_task_ids = set()
+            try:
+                existing_resp = requests.get(
+                    f"{REST_URL}/cleaning_inspection_tasks",
+                    headers=SERVICE_HEADERS,
+                    params={"inspection_id": f"eq.{inspection_id}", "select": "id,name"}
+                )
+                if existing_resp.status_code == 200:
+                    existing_tasks = existing_resp.json() or []
+                    existing_task_ids = {t.get("id") for t in existing_tasks if t.get("id")}
+                    print(f"Found {len(existing_task_ids)} existing cleaning tasks for inspection {inspection_id}: {existing_task_ids}")
+                else:
+                    print(f"No existing cleaning tasks found for inspection {inspection_id} (status: {existing_resp.status_code})")
+            except Exception as e:
+                print(f"Error getting existing cleaning tasks for inspection {inspection_id}: {str(e)}")
+            
+            # Upsert tasks one by one
+            for task in tasks:
+                try:
+                    # Ensure completed is a boolean
+                    completed = task.get("completed", False)
+                    if isinstance(completed, str):
+                        completed = completed.lower() in ('true', '1', 'yes', 'on')
+                    elif completed is None:
+                        completed = False
+                    else:
+                        completed = bool(completed)
+                    
+                    task_data = {
+                        "id": task.get("id") or str(uuid.uuid4()),
+                        "inspection_id": inspection_id,
+                        "name": task.get("name", ""),
+                        "completed": completed,
+                    }
+                    task_id = task_data["id"]
+                    print(f"Saving cleaning task {task_id} ({task_data['name']}): completed={completed}")
+                    
+                    # Try to update if task exists for THIS inspection, otherwise insert
+                    task_exists_for_this_inspection = task_id in existing_task_ids
+                    
+                    if task_exists_for_this_inspection:
+                        # Task exists for this inspection, update it
+                        print(f"  → Updating existing cleaning task {task_id} for inspection {inspection_id}")
+                        update_resp = requests.patch(
+                            f"{REST_URL}/cleaning_inspection_tasks?id=eq.{task_id}&inspection_id=eq.{inspection_id}",
+                            headers={**SERVICE_HEADERS, "Prefer": "return=representation"},
+                            json={"completed": task_data["completed"], "name": task_data["name"]}
+                        )
+                        if update_resp.status_code in [200, 201, 204]:
+                            saved_tasks.append(task_data)
+                            print(f"  ✓ Cleaning task {task_id} updated successfully")
+                        else:
+                            # Update failed, try insert
+                            print(f"  ⚠ Update failed (status {update_resp.status_code}), trying insert...")
+                            task_resp = requests.post(
+                                f"{REST_URL}/cleaning_inspection_tasks",
+                                headers=SERVICE_HEADERS,
+                                json=task_data
+                            )
+                            if task_resp.status_code in [200, 201]:
+                                saved_tasks.append(task_data)
+                                print(f"  ✓ Cleaning task {task_id} inserted successfully (after update failed)")
+                            elif task_resp.status_code == 404:
+                                error_text = task_resp.text[:200] if task_resp.text else ""
+                                print(f"  ✗ ERROR: Table doesn't exist (404) - cleaning task {task_id} NOT saved: {error_text}")
+                                failed_tasks.append(task_data)
+                            else:
+                                error_text = task_resp.text[:200] if task_resp.text else ""
+                                print(f"  ✗ ERROR: Failed to insert cleaning task {task_id} after update failed: {task_resp.status_code} {error_text}")
+                                failed_tasks.append(task_data)
+                    else:
+                        # Task doesn't exist for this inspection, insert it
+                        print(f"  → Inserting new cleaning task {task_id} for inspection {inspection_id}")
+                        task_resp = requests.post(
+                            f"{REST_URL}/cleaning_inspection_tasks",
+                            headers=SERVICE_HEADERS,
+                            json=task_data
+                        )
+                        if task_resp.status_code in [200, 201]:
+                            saved_tasks.append(task_data)
+                            print(f"  ✓ Cleaning task {task_id} inserted successfully")
+                        elif task_resp.status_code == 404:
+                            error_text = task_resp.text[:200] if task_resp.text else ""
+                            print(f"  ✗ ERROR: Table doesn't exist (404) - cleaning task {task_id} NOT saved: {error_text}")
+                            failed_tasks.append(task_data)
+                        elif task_resp.status_code == 409:
+                            # Conflict - try to update it for this inspection_id
+                            print(f"  ⚠ Conflict (409) - cleaning task {task_id} may exist for another inspection, trying update...")
+                            try:
+                                update_resp = requests.patch(
+                                    f"{REST_URL}/cleaning_inspection_tasks?id=eq.{task_id}&inspection_id=eq.{inspection_id}",
+                                    headers={**SERVICE_HEADERS, "Prefer": "return=representation"},
+                                    json={"completed": task_data["completed"], "name": task_data["name"]}
+                                )
+                                if update_resp.status_code in [200, 201, 204]:
+                                    saved_tasks.append(task_data)
+                                    print(f"  ✓ Cleaning task {task_id} updated after conflict")
+                                else:
+                                    error_text = update_resp.text[:200] if update_resp.text else ""
+                                    print(f"  ✗ ERROR: Failed to update cleaning task {task_id} after conflict: {update_resp.status_code} {error_text}")
+                                    failed_tasks.append(task_data)
+                            except Exception as e:
+                                print(f"  ✗ ERROR: Exception updating cleaning task {task_id} after conflict: {str(e)}")
+                                failed_tasks.append(task_data)
+                        else:
+                            error_text = task_resp.text[:200] if task_resp.text else ""
+                            print(f"  ✗ ERROR: Failed to insert cleaning task {task_id}: {task_resp.status_code} {error_text}")
+                            failed_tasks.append(task_data)
+                except requests.exceptions.HTTPError as e:
+                    if e.response and e.response.status_code == 404:
+                        saved_tasks.append({
+                            "id": task.get("id") or str(uuid.uuid4()),
+                            "inspection_id": inspection_id,
+                            "name": task.get("name", ""),
+                            "completed": bool(task.get("completed", False)),
+                        })
+                    else:
+                        error_text = e.response.text[:200] if e.response and e.response.text else str(e)
+                        print(f"Warning: Failed to save cleaning task: {error_text}")
+                        failed_tasks.append({
+                            "id": task.get("id") or str(uuid.uuid4()),
+                            "inspection_id": inspection_id,
+                            "name": task.get("name", ""),
+                            "completed": bool(task.get("completed", False)),
+                        })
+                except Exception as e:
+                    print(f"Warning: Exception saving cleaning task: {str(e)}")
+                    failed_tasks.append({
+                        "id": task.get("id") or str(uuid.uuid4()),
+                        "inspection_id": inspection_id,
+                        "name": task.get("name", ""),
+                        "completed": bool(task.get("completed", False)),
+                    })
+            
+            # Only delete tasks that are no longer in the list (cleanup)
+            if saved_tasks and len(saved_tasks) == len(tasks) and len(failed_tasks) == 0:
+                try:
+                    saved_task_ids = {t["id"] for t in saved_tasks}
+                    if existing_task_ids:
+                        tasks_to_delete = existing_task_ids - saved_task_ids
+                        if tasks_to_delete:
+                            print(f"Cleaning up {len(tasks_to_delete)} orphaned cleaning tasks for inspection {inspection_id}: {tasks_to_delete}")
+                            for task_id_to_delete in tasks_to_delete:
+                                try:
+                                    delete_resp = requests.delete(
+                                        f"{REST_URL}/cleaning_inspection_tasks?id=eq.{task_id_to_delete}&inspection_id=eq.{inspection_id}",
+                                        headers=SERVICE_HEADERS
+                                    )
+                                    if delete_resp.status_code in [200, 204]:
+                                        print(f"  ✓ Deleted orphaned cleaning task {task_id_to_delete} for inspection {inspection_id}")
+                                    else:
+                                        print(f"  ⚠ Failed to delete cleaning task {task_id_to_delete} for inspection {inspection_id}: {delete_resp.status_code}")
+                                except Exception as e:
+                                    print(f"  ✗ Error deleting cleaning task {task_id_to_delete} for inspection {inspection_id}: {str(e)}")
+                except Exception as e:
+                    print(f"Error during cleanup for cleaning inspection {inspection_id}: {str(e)}")
+            
+            # Log summary
+            print(f"Cleaning inspection {inspection_id}: Saved {len(saved_tasks)}/{len(tasks)} tasks. Failed: {len(failed_tasks)}")
+            if failed_tasks:
+                print(f"WARNING: {len(failed_tasks)} cleaning tasks failed to save:")
+                for failed_task in failed_tasks[:5]:
+                    print(f"  - Cleaning task {failed_task.get('id')} ({failed_task.get('name')})")
+            
+            if saved_tasks:
+                return_tasks = saved_tasks
+            else:
+                print(f"ERROR: All {len(tasks)} cleaning tasks failed to save for inspection {inspection_id}!")
+                return_tasks = tasks
+        
+        # Return the created/updated cleaning inspection with tasks
+        completed_count = sum(1 for t in return_tasks if t.get("completed", False))
+        result = {
+            "id": inspection_id,
+            "orderId": order_id,
+            "unitNumber": inspection_data["unit_number"],
+            "guestName": inspection_data["guest_name"],
+            "departureDate": inspection_data["departure_date"],
+            "status": inspection_data["status"],
+            "tasks": return_tasks,
+            "savedTasksCount": len(saved_tasks),
+            "totalTasksCount": len(tasks),
+            "completedTasksCount": completed_count,
+            "failedTasksCount": len(failed_tasks),
+        }
+        print(f"Returning cleaning inspection result: {len(return_tasks)} tasks ({len(saved_tasks)} saved, {len(failed_tasks)} failed), {completed_count} completed")
+        return result
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating/updating cleaning inspection: {str(e)}")
+
+@app.patch("/api/cleaning-inspections/{inspection_id}/tasks/{task_id}")
+def update_cleaning_inspection_task(inspection_id: str, task_id: str, payload: dict):
+    """Update a single cleaning inspection task (e.g., toggle completion). Creates task if it doesn't exist."""
+    try:
+        task_data = {}
+        if "completed" in payload:
+            task_data["completed"] = payload["completed"]
+        if "name" in payload:
+            task_data["name"] = payload["name"]
+        
+        if not task_data:
+            return {"message": "No changes provided"}
+        
+        # First, try to find the task by id and inspection_id
+        existing_task = None
+        try:
+            check_resp = requests.get(
+                f"{REST_URL}/cleaning_inspection_tasks",
+                headers=SERVICE_HEADERS,
+                params={"id": f"eq.{task_id}", "inspection_id": f"eq.{inspection_id}", "select": "*"}
+            )
+            if check_resp.status_code == 200:
+                existing_tasks = check_resp.json() or []
+                if existing_tasks and len(existing_tasks) > 0:
+                    existing_task = existing_tasks[0]
+        except requests.exceptions.HTTPError as e:
+            if e.response and e.response.status_code == 404:
+                existing_task = None
+            else:
+                existing_task = None
+        
+        if existing_task:
+            # Update existing task
+            update_resp = requests.patch(
+                f"{REST_URL}/cleaning_inspection_tasks?id=eq.{task_id}&inspection_id=eq.{inspection_id}",
+                headers={**SERVICE_HEADERS, "Prefer": "return=representation"},
+                json=task_data
+            )
+            if update_resp.status_code in [200, 201, 204]:
+                try:
+                    result = update_resp.json()
+                    updated_task = result[0] if isinstance(result, list) and result else result
+                    return {
+                        "id": updated_task.get("id") if isinstance(updated_task, dict) else task_id,
+                        "name": updated_task.get("name") if isinstance(updated_task, dict) else existing_task.get("name", ""),
+                        "completed": updated_task.get("completed", False) if isinstance(updated_task, dict) else task_data.get("completed", False),
+                    }
+                except:
+                    return {
+                        "id": task_id,
+                        "name": existing_task.get("name", ""),
+                        "completed": task_data.get("completed", False),
+                    }
+        
+        # Task doesn't exist, create it
+        task_name = task_data.get("name") or payload.get("name", "")
+        create_data = {
+            "id": task_id,
+            "inspection_id": inspection_id,
+            "name": task_name,
+            "completed": task_data.get("completed", False),
+        }
+        
+        try:
+            create_resp = requests.post(
+                f"{REST_URL}/cleaning_inspection_tasks",
+                headers=SERVICE_HEADERS,
+                json=create_data
+            )
+            if create_resp.status_code == 404:
+                return create_data
+            if create_resp.status_code in [200, 201]:
+                try:
+                    result = create_resp.json()
+                    created_task = result[0] if isinstance(result, list) and result else result
+                    return {
+                        "id": created_task.get("id") if isinstance(created_task, dict) else task_id,
+                        "name": created_task.get("name") if isinstance(created_task, dict) else task_name,
+                        "completed": created_task.get("completed", False) if isinstance(created_task, dict) else task_data.get("completed", False),
+                    }
+                except:
+                    return create_data
+        except requests.exceptions.HTTPError as e:
+            if e.response and e.response.status_code == 404:
+                return create_data
+            return create_data
+        except Exception:
+            return create_data
+    except requests.exceptions.HTTPError as e:
+        if e.response and e.response.status_code == 404:
+            return {
+                "id": task_id,
+                "name": payload.get("name", ""),
+                "completed": payload.get("completed", False),
+            }
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        return {
+            "id": task_id,
+            "name": payload.get("name", ""),
+            "completed": payload.get("completed", False),
+        }
+
 @app.get("/inventory/items")
 def inventory_items():
     try:
@@ -1393,7 +2102,7 @@ def api_create_inventory_order(payload: dict):
     order_data = {
         "id": order_id,
         "order_date": payload.get("orderDate") or payload.get("order_date", ""),
-        "status": payload.get("status", "ממתין לאישור"),
+        "status": payload.get("status", "מחכה להשלמת תשלום"),
         "order_type": payload.get("orderType") or payload.get("order_type", "הזמנה כללית"),
     }
     
