@@ -1,19 +1,18 @@
 -- Add role and image_url columns to users table
 
--- Add role column if it doesn't exist
+-- Add role column if it doesn't exist (with DEFAULT so existing rows get the value)
 DO $$ 
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM information_schema.columns 
         WHERE table_name = 'users' AND column_name = 'role'
     ) THEN
-        ALTER TABLE users ADD COLUMN role text;
-        -- Set default for new rows
+        -- Add column with DEFAULT - this automatically sets the value for existing rows
+        ALTER TABLE users ADD COLUMN role text DEFAULT 'עובד תחזוקה';
+        -- Keep the default for future inserts
         ALTER TABLE users ALTER COLUMN role SET DEFAULT 'עובד תחזוקה';
-        -- Update existing rows
-        UPDATE users SET role = 'עובד תחזוקה' WHERE role IS NULL;
     ELSE
-        -- Column exists, just update NULL values
+        -- Column exists, just update NULL values if any
         UPDATE users SET role = 'עובד תחזוקה' WHERE role IS NULL;
     END IF;
 END $$;
