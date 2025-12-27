@@ -195,6 +195,52 @@ def api_list_users():
     """Alias for /users to match frontend expectations"""
     return list_users()
 
+@app.get("/api/users/with-details")
+def api_list_users_with_details():
+    """
+    Return all users with their details including image_url, hourly_wage, and role.
+    For employee management page.
+    """
+    try:
+        resp = requests.get(
+            f"{REST_URL}/users",
+            headers=SERVICE_HEADERS,
+            params={"select": "id,username,image_url,hourly_wage,role", "order": "username.asc"},
+        )
+        resp.raise_for_status()
+        return resp.json() or []
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching users: {str(e)}")
+
+@app.patch("/api/users/{user_id}/wage")
+def api_update_user_wage(user_id: str, payload: dict):
+    """
+    Update hourly wage for a user.
+    """
+    try:
+        hourly_wage = payload.get("hourly_wage")
+        if hourly_wage is None:
+            raise HTTPException(status_code=400, detail="hourly_wage is required")
+        
+        # Update the user's hourly_wage
+        update_data = {"hourly_wage": float(hourly_wage)}
+        resp = requests.patch(
+            f"{REST_URL}/users?id=eq.{user_id}",
+            headers=SERVICE_HEADERS,
+            json=update_data
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        return result[0] if isinstance(result, list) and result else result
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating user wage: {str(e)}")
+
 @app.get("/orders")
 def orders():
     try:
@@ -3241,6 +3287,18 @@ def attendance_logs():
 def api_attendance_logs():
     """Alias for /attendance/logs to match frontend expectations"""
     return attendance_logs()
+
+@app.get("/api/attendance/logs/all")
+def api_attendance_logs_all():
+    """
+    Get all attendance logs (no limit) for employee management.
+    """
+    try:
+        resp = requests.get(f"{REST_URL}/attendance_logs", headers=SERVICE_HEADERS, params={"select": "*", "order": "clock_in.desc"})
+        resp.raise_for_status()
+        return resp.json() or []
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching attendance logs: {str(e)}")
 
 @app.get("/attendance/status/{employee}")
 def get_attendance_status(employee: str):
