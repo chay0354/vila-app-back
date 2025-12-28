@@ -27,9 +27,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allow all origins
     allow_credentials=False,  # Set to False when using wildcard
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
     allow_headers=["*"],
     expose_headers=["*"],
+    max_age=3600,
 )
 
 REST_URL = f"{SUPABASE_URL}/rest/v1"
