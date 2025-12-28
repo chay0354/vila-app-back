@@ -2532,9 +2532,74 @@ def update_maintenance_task(task_id: str, payload: dict):
         raise HTTPException(status_code=500, detail=f"Error updating maintenance task: {str(e)}")
 
 @app.patch("/api/maintenance/tasks/{task_id}")
-def api_update_maintenance_task(task_id: str, payload: dict):
-    """Alias for /maintenance/tasks/{task_id} to match frontend expectations"""
-    return update_maintenance_task(task_id, payload)
+async def api_update_maintenance_task(request: Request, task_id: str):
+    """
+    Update maintenance task.
+    
+    Supports both:
+    - application/json (legacy)
+    - multipart/form-data with optional file field `media`
+    """
+    content_type = (request.headers.get("content-type") or "").lower()
+    
+    data: dict = {}
+    media_data_uri: Optional[str] = None
+    
+    try:
+        if content_type.startswith("application/json"):
+            payload = await request.json()
+            if isinstance(payload, dict):
+                data = payload
+                # If imageUri is provided in JSON payload, use it directly
+                if "imageUri" in data:
+                    data["image_uri"] = data.pop("imageUri")
+        else:
+            # multipart/form-data
+            form = await request.form()
+            data = {k: v for k, v in form.items() if k != "media"}
+            media = form.get("media")
+            if media is not None and hasattr(media, "filename"):
+                # Starlette UploadFile-like
+                filename = getattr(media, "filename", None) or "upload.bin"
+                content_type_media = getattr(media, "content_type", None) or "application/octet-stream"
+                raw = await media.read()
+                b64 = base64.b64encode(raw).decode("ascii")
+                media_data_uri = f"data:{content_type_media};base64,{b64}"
+                data["image_uri"] = media_data_uri
+        
+        # Normalize keys for Supabase schema
+        if "unitId" in data:
+            data["unit_id"] = data.pop("unitId")
+        if "createdDate" in data:
+            data["created_date"] = data.pop("createdDate")
+        if "assignedTo" in data:
+            assigned_value = data.pop("assignedTo")
+            if assigned_value:
+                data["assigned_to"] = assigned_value
+        
+        # Remove None values
+        data = {k: v for k, v in data.items() if v is not None}
+        
+        if not data:
+            return {"message": "No changes provided"}
+        
+        # Update in Supabase
+        headers = {**SERVICE_HEADERS, "Prefer": "return=representation"}
+        resp = requests.patch(
+            f"{REST_URL}/maintenance_tasks?id=eq.{task_id}",
+            headers=headers,
+            json=data
+        )
+        resp.raise_for_status()
+        if resp.text:
+            result = resp.json()
+            return result[0] if isinstance(result, list) and result else result
+        return {"id": task_id, "message": "Updated successfully"}
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating maintenance task: {str(e)}")
 
 @app.delete("/maintenance/tasks/{task_id}")
 def delete_maintenance_task(task_id: str):
