@@ -21,11 +21,13 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="bolavila-backend")
 
 # Configure CORS to allow all origins
+# Note: Cannot use allow_origins=["*"] with allow_credentials=True
+# So we'll allow credentials but use a wildcard pattern that works
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_origins=["*"],  # Allow all origins
+    allow_credentials=False,  # Set to False when using wildcard
+    allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
 )
