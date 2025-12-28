@@ -23,12 +23,17 @@ app.add_middleware(
 )
 
 REST_URL = f"{SUPABASE_URL}/rest/v1"
+STORAGE_URL = f"{SUPABASE_URL}/storage/v1"
 SERVICE_HEADERS = {
     "apikey": SUPABASE_SERVICE_ROLE_KEY,
     "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
     "Content-Type": "application/json",
     "Accept": "application/json",
     "Prefer": "return=representation",  # Return inserted row
+}
+STORAGE_HEADERS = {
+    "apikey": SUPABASE_SERVICE_ROLE_KEY,
+    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
 }
 
 @app.get("/")
@@ -2393,6 +2398,50 @@ def api_maintenance_tasks():
     """Alias for /maintenance/tasks to match frontend expectations"""
     return maintenance_tasks()
 
+@app.post("/api/storage/upload")
+async def upload_to_storage(request: Request):
+    """
+    Upload a file to Supabase Storage.
+    Returns the public URL of the uploaded file.
+    """
+    try:
+        form = await request.form()
+        media = form.get("file")
+        if not media or not hasattr(media, "filename"):
+            raise HTTPException(status_code=400, detail="File is required")
+        
+        filename = getattr(media, "filename", None) or f"upload-{uuid.uuid4()}"
+        content_type = getattr(media, "content_type", None) or "application/octet-stream"
+        raw = await media.read()
+        
+        # Determine bucket based on content type
+        bucket = "videos" if content_type.startswith("video/") else "images"
+        
+        # Generate unique filename
+        file_ext = filename.split(".")[-1] if "." in filename else ("mp4" if content_type.startswith("video/") else "jpg")
+        unique_filename = f"{uuid.uuid4()}.{file_ext}"
+        
+        # Upload to Supabase Storage
+        upload_url = f"{STORAGE_URL}/object/{bucket}/{unique_filename}"
+        upload_headers = {
+            **STORAGE_HEADERS,
+            "Content-Type": content_type,
+        }
+        
+        resp = requests.put(upload_url, headers=upload_headers, data=raw)
+        if resp.status_code not in [200, 201]:
+            error_text = resp.text[:200] if resp.text else "Unknown error"
+            raise HTTPException(status_code=500, detail=f"Storage upload failed: {error_text}")
+        
+        # Get public URL
+        public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{unique_filename}"
+        
+        return {"url": public_url, "filename": unique_filename}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error uploading file: {str(e)}")
+
 @app.post("/api/maintenance/tasks")
 async def api_create_maintenance_task(request: Request):
     """Alias for /maintenance/tasks to match frontend expectations"""
@@ -2431,13 +2480,35 @@ async def create_maintenance_task(request: Request):
             data = {k: v for k, v in form.items() if k != "media"}
             media = form.get("media")
             if media is not None and hasattr(media, "filename"):
-                # Starlette UploadFile-like
+                # Upload to Supabase Storage instead of storing as data URI
                 filename = getattr(media, "filename", None) or "upload.bin"
                 content_type = getattr(media, "content_type", None) or "application/octet-stream"
                 raw = await media.read()
-                b64 = base64.b64encode(raw).decode("ascii")
-                media_data_uri = f"data:{content_type};base64,{b64}"
-                data["image_uri"] = media_data_uri
+                
+                # Determine bucket based on content type
+                bucket = "videos" if content_type.startswith("video/") else "images"
+                
+                # Generate unique filename
+                file_ext = filename.split(".")[-1] if "." in filename else ("mp4" if content_type.startswith("video/") else "jpg")
+                unique_filename = f"{uuid.uuid4()}.{file_ext}"
+                
+                # Upload to Supabase Storage
+                upload_url = f"{STORAGE_URL}/object/{bucket}/{unique_filename}"
+                upload_headers = {
+                    **STORAGE_HEADERS,
+                    "Content-Type": content_type,
+                }
+                
+                resp = requests.put(upload_url, headers=upload_headers, data=raw)
+                if resp.status_code not in [200, 201]:
+                    # Fallback to data URI if storage upload fails
+                    b64 = base64.b64encode(raw).decode("ascii")
+                    media_data_uri = f"data:{content_type};base64,{b64}"
+                    data["image_uri"] = media_data_uri
+                else:
+                    # Use public URL from storage
+                    public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{unique_filename}"
+                    data["image_uri"] = public_url
 
         if not data.get("id"):
             data["id"] = str(uuid.uuid4())
@@ -2559,13 +2630,35 @@ async def api_update_maintenance_task(request: Request, task_id: str):
             data = {k: v for k, v in form.items() if k != "media"}
             media = form.get("media")
             if media is not None and hasattr(media, "filename"):
-                # Starlette UploadFile-like
+                # Upload to Supabase Storage instead of storing as data URI
                 filename = getattr(media, "filename", None) or "upload.bin"
                 content_type_media = getattr(media, "content_type", None) or "application/octet-stream"
                 raw = await media.read()
-                b64 = base64.b64encode(raw).decode("ascii")
-                media_data_uri = f"data:{content_type_media};base64,{b64}"
-                data["image_uri"] = media_data_uri
+                
+                # Determine bucket based on content type
+                bucket = "videos" if content_type_media.startswith("video/") else "images"
+                
+                # Generate unique filename
+                file_ext = filename.split(".")[-1] if "." in filename else ("mp4" if content_type_media.startswith("video/") else "jpg")
+                unique_filename = f"{uuid.uuid4()}.{file_ext}"
+                
+                # Upload to Supabase Storage
+                upload_url = f"{STORAGE_URL}/object/{bucket}/{unique_filename}"
+                upload_headers = {
+                    **STORAGE_HEADERS,
+                    "Content-Type": content_type_media,
+                }
+                
+                resp = requests.put(upload_url, headers=upload_headers, data=raw)
+                if resp.status_code not in [200, 201]:
+                    # Fallback to data URI if storage upload fails
+                    b64 = base64.b64encode(raw).decode("ascii")
+                    media_data_uri = f"data:{content_type_media};base64,{b64}"
+                    data["image_uri"] = media_data_uri
+                else:
+                    # Use public URL from storage
+                    public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{unique_filename}"
+                    data["image_uri"] = public_url
         
         # Normalize keys for Supabase schema
         if "unitId" in data:
