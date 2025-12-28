@@ -12,7 +12,6 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from .supabase_client import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 import pywebpush
-from py_vapid import Vapid01
 import logging
 
 # Configure logging
@@ -50,13 +49,12 @@ VAPID_EMAIL = os.getenv("VAPID_EMAIL", "mailto:admin@bolavilla.com")
 FCM_SERVER_KEY = os.getenv("FCM_SERVER_KEY", "")
 
 # Initialize VAPID if keys are provided
+# Note: pywebpush handles VAPID internally, no separate package needed
 vapid_claims = None
 if VAPID_PRIVATE_KEY and VAPID_PUBLIC_KEY:
     try:
-        from py_vapid import Vapid01
         vapid_claims = {
-            "sub": VAPID_EMAIL,
-            "aud": "https://fcm.googleapis.com"
+            "sub": VAPID_EMAIL
         }
         logger.info("VAPID keys configured for Web Push")
     except Exception as e:
