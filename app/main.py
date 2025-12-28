@@ -10,6 +10,8 @@ import json
 from datetime import datetime
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.cors import CORSMiddleware as StarletteCORSMiddleware
+from starlette.middleware import Middleware
 from .supabase_client import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 import pywebpush
 import logging
