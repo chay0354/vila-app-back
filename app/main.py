@@ -2664,9 +2664,53 @@ async def api_update_maintenance_task(request: Request, task_id: str):
             payload = await request.json()
             if isinstance(payload, dict):
                 data = payload
-                # If imageUri is provided in JSON payload, use it directly
-                if "imageUri" in data:
-                    data["image_uri"] = data.pop("imageUri")
+                # If imageUri is provided in JSON payload, check if it's a data URI and upload to storage
+                if "imageUri" in data or "image_uri" in data:
+                    image_uri = data.pop("imageUri", None) or data.pop("image_uri", None)
+                    if image_uri:
+                        # If it's a data URI (especially for videos), upload to storage
+                        if image_uri.startswith("data:"):
+                            try:
+                                # Extract mime type and base64 data
+                                parts = image_uri.split(",", 1)
+                                if len(parts) == 2:
+                                    mime_part = parts[0].split(";")[0]
+                                    mime_type = mime_part.replace("data:", "") if mime_part.startswith("data:") else "application/octet-stream"
+                                    base64_data = parts[1]
+                                    
+                                    # Decode base64
+                                    raw = base64.b64decode(base64_data)
+                                    
+                                    # Determine bucket (using "vidoes" as shown in Supabase)
+                                    bucket = "vidoes" if mime_type.startswith("video/") else "images"
+                                    
+                                    # Generate unique filename
+                                    file_ext = "mp4" if mime_type.startswith("video/") else ("jpg" if "jpeg" in mime_type else "png")
+                                    unique_filename = f"{uuid.uuid4()}.{file_ext}"
+                                    
+                                    # Upload to Supabase Storage
+                                    upload_url = f"{STORAGE_URL}/object/{bucket}/{unique_filename}"
+                                    upload_headers = {
+                                        **STORAGE_HEADERS,
+                                        "Content-Type": mime_type,
+                                    }
+                                    
+                                    resp = requests.put(upload_url, headers=upload_headers, data=raw)
+                                    if resp.status_code in [200, 201]:
+                                        # Use public URL from storage
+                                        public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{unique_filename}"
+                                        data["image_uri"] = public_url
+                                    else:
+                                        # Fallback to data URI if storage upload fails
+                                        data["image_uri"] = image_uri
+                                else:
+                                    data["image_uri"] = image_uri
+                            except Exception as e:
+                                # Fallback to data URI if conversion fails
+                                print(f"Error uploading data URI to storage: {e}")
+                                data["image_uri"] = image_uri
+                        else:
+                            data["image_uri"] = image_uri
         else:
             # multipart/form-data
             form = await request.form()
@@ -2678,8 +2722,8 @@ async def api_update_maintenance_task(request: Request, task_id: str):
                 content_type_media = getattr(media, "content_type", None) or "application/octet-stream"
                 raw = await media.read()
                 
-                # Determine bucket based on content type
-                bucket = "videos" if content_type_media.startswith("video/") else "images"
+                # Determine bucket based on content type (using "vidoes" as shown in Supabase)
+                bucket = "vidoes" if content_type_media.startswith("video/") else "images"
                 
                 # Generate unique filename
                 file_ext = filename.split(".")[-1] if "." in filename else ("mp4" if content_type_media.startswith("video/") else "jpg")
