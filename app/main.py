@@ -163,7 +163,7 @@ async def options_handler(full_path: str):
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
             "Access-Control-Allow-Headers": "*",
-            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Max-Age": "3600",
         }
     )
 
