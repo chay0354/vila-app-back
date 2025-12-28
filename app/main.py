@@ -18,14 +18,19 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="bolavila-backend")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# Configure CORS to allow all origins
+app = FastAPI(
+    title="bolavila-backend",
+    middleware=[
+        Middleware(
+            StarletteCORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=["*"],
+        )
+    ]
 )
 
 REST_URL = f"{SUPABASE_URL}/rest/v1"
