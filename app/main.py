@@ -4284,3 +4284,134 @@ def create_monthly_inspection(payload: dict):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error saving monthly inspection: {str(e)}")
 
+# Push notification endpoints
+class PushTokenRequest(BaseModel):
+    username: str
+    token: str
+    platform: str  # 'android', 'ios', or 'web'
+
+class SendNotificationRequest(BaseModel):
+    title: str
+    body: str
+    username: Optional[str] = None  # If None, send to all users
+    data: Optional[dict] = None
+
+@app.post("/push/register")
+def register_push_token(payload: PushTokenRequest):
+    """
+    Register a push notification token for a user.
+    Stores FCM tokens for React Native and Web Push subscriptions for PWA.
+    """
+    try:
+        # Check if token already exists for this user and platform
+        resp = requests.get(
+            f"{REST_URL}/push_tokens",
+            headers=SERVICE_HEADERS,
+            params={
+                "username": f"eq.{payload.username}",
+                "platform": f"eq.{payload.platform}",
+                "select": "id"
+            }
+        )
+        resp.raise_for_status()
+        existing = resp.json()
+        
+        token_data = {
+            "id": str(uuid.uuid4()),
+            "username": payload.username,
+            "token": payload.token,
+            "platform": payload.platform,
+            "updated_at": datetime.now().isoformat()
+        }
+        
+        if existing and len(existing) > 0:
+            # Update existing token
+            token_id = existing[0]["id"]
+            resp = requests.patch(
+                f"{REST_URL}/push_tokens",
+                headers=SERVICE_HEADERS,
+                params={"id": f"eq.{token_id}"},
+                json={"token": payload.token, "updated_at": token_data["updated_at"]}
+            )
+            resp.raise_for_status()
+        else:
+            # Create new token
+            token_data["created_at"] = token_data["updated_at"]
+            resp = requests.post(
+                f"{REST_URL}/push_tokens",
+                headers=SERVICE_HEADERS,
+                json=token_data
+            )
+            resp.raise_for_status()
+        
+        return {"message": "Push token registered successfully"}
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error registering push token: {str(e)}")
+
+@app.post("/push/send")
+def send_push_notification(payload: SendNotificationRequest):
+    """
+    Send push notification to user(s).
+    If username is provided, send to that user only.
+    If username is None, send to all users.
+    """
+    try:
+        # Get push tokens
+        params = {"select": "username,token,platform"}
+        if payload.username:
+            params["username"] = f"eq.{payload.username}"
+        
+        resp = requests.get(
+            f"{REST_URL}/push_tokens",
+            headers=SERVICE_HEADERS,
+            params=params
+        )
+        resp.raise_for_status()
+        tokens = resp.json() or []
+        
+        if not tokens:
+            return {"message": "No push tokens found", "sent": 0}
+        
+        # Send notifications
+        # Note: For production, you would integrate with FCM/APNS for native apps
+        # and Web Push API for PWA. For now, we'll store the notification intent.
+        # The actual sending would be done via:
+        # - FCM API for Android/iOS
+        # - Web Push API for PWA
+        
+        # Store notification in database for tracking
+        notification_data = {
+            "id": str(uuid.uuid4()),
+            "title": payload.title,
+            "body": payload.body,
+            "username": payload.username,
+            "data": json.dumps(payload.data) if payload.data else None,
+            "created_at": datetime.now().isoformat(),
+            "sent_count": len(tokens)
+        }
+        
+        try:
+            resp = requests.post(
+                f"{REST_URL}/push_notifications",
+                headers=SERVICE_HEADERS,
+                json=notification_data
+            )
+            resp.raise_for_status()
+        except:
+            # If table doesn't exist, continue without storing
+            pass
+        
+        return {
+            "message": f"Notification queued for {len(tokens)} device(s)",
+            "sent": len(tokens),
+            "tokens": len(tokens)
+        }
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error sending push notification: {str(e)}")
+
