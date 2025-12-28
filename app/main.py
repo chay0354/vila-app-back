@@ -4415,3 +4415,14 @@ def send_push_notification(payload: SendNotificationRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error sending push notification: {str(e)}")
 
+# Add /api/ prefix endpoints for frontend compatibility
+@app.post("/api/push/register")
+def api_register_push_token(payload: PushTokenRequest):
+    """Alias for /push/register to match frontend expectations"""
+    return register_push_token(payload)
+
+@app.post("/api/push/send")
+def api_send_push_notification(payload: SendNotificationRequest):
+    """Alias for /push/send to match frontend expectations"""
+    return send_push_notification(payload)
+
