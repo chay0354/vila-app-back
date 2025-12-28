@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Optional
 import uuid
 import os
 import requests
@@ -10,51 +10,16 @@ import json
 from datetime import datetime
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request as StarletteRequest
-from starlette.responses import Response
 from .supabase_client import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
-import pywebpush
-import logging
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 app = FastAPI(title="bolavila-backend")
 
-# Custom middleware to handle CORS preflight requests explicitly
-class CORSPreflightMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: StarletteRequest, call_next):
-        if request.method == "OPTIONS":
-            return Response(
-                content="",
-                status_code=200,
-                headers={
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD",
-                    "Access-Control-Allow-Headers": "*",
-                    "Access-Control-Max-Age": "3600",
-                }
-            )
-        response = await call_next(request)
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD"
-        response.headers["Access-Control-Allow-Headers"] = "*"
-        return response
-
-# Add custom CORS middleware first (runs before other middleware)
-app.add_middleware(CORSPreflightMiddleware)
-
-# Also add FastAPI's CORS middleware as backup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
-    max_age=3600,
 )
 
 REST_URL = f"{SUPABASE_URL}/rest/v1"
@@ -70,127 +35,6 @@ STORAGE_HEADERS = {
     "apikey": SUPABASE_SERVICE_ROLE_KEY,
     "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
 }
-
-# Push notification configuration
-VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "")
-VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY", "")
-VAPID_EMAIL = os.getenv("VAPID_EMAIL", "mailto:admin@bolavilla.com")
-FCM_SERVER_KEY = os.getenv("FCM_SERVER_KEY", "")
-
-# Initialize VAPID if keys are provided
-# Note: pywebpush handles VAPID internally, no separate package needed
-vapid_claims = None
-if VAPID_PRIVATE_KEY and VAPID_PUBLIC_KEY:
-    try:
-        vapid_claims = {
-            "sub": VAPID_EMAIL
-        }
-        logger.info("VAPID keys configured for Web Push")
-    except Exception as e:
-        logger.warning(f"Failed to initialize VAPID: {e}")
-
-def send_web_push_notification(subscription: Dict[str, Any], title: str, body: str, icon: str = "/app-icon.jpg"):
-    """Send a Web Push notification to a PWA subscription"""
-    if not VAPID_PRIVATE_KEY or not VAPID_PUBLIC_KEY:
-        logger.warning("VAPID keys not configured, skipping Web Push")
-        return False
-    
-    try:
-        pywebpush.webpush(
-            subscription_info=subscription,
-            data=json.dumps({
-                "title": title,
-                "body": body,
-                "icon": icon,
-                "badge": icon,
-                "tag": "notification",
-                "requireInteraction": False
-            }),
-            vapid_private_key=VAPID_PRIVATE_KEY,
-            vapid_claims=vapid_claims
-        )
-        logger.info(f"Web Push notification sent: {title}")
-        return True
-    except Exception as e:
-        logger.error(f"Error sending Web Push notification: {e}")
-        return False
-
-def send_fcm_notification(fcm_token: str, title: str, body: str):
-    """Send an FCM notification to a native Android device"""
-    if not FCM_SERVER_KEY:
-        logger.warning("FCM server key not configured, skipping FCM notification")
-        return False
-    
-    try:
-        url = "https://fcm.googleapis.com/fcm/send"
-        headers = {
-            "Authorization": f"key={FCM_SERVER_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "to": fcm_token,
-            "notification": {
-                "title": title,
-                "body": body,
-                "icon": "app-icon",
-                "sound": "default"
-            },
-            "data": {
-                "title": title,
-                "body": body
-            },
-            "priority": "high"
-        }
-        resp = requests.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
-        logger.info(f"FCM notification sent: {title}")
-        return True
-    except Exception as e:
-        logger.error(f"Error sending FCM notification: {e}")
-        return False
-
-def send_push_notification_to_user(username: str, title: str, body: str):
-    """Send push notification to all devices registered for a user"""
-    try:
-        # Get all push subscriptions for this user
-        resp = requests.get(
-            f"{REST_URL}/push_subscriptions",
-            headers=SERVICE_HEADERS,
-            params={"username": f"eq.{username}", "select": "*"}
-        )
-        if resp.status_code == 200:
-            subscriptions = resp.json() or []
-            for sub in subscriptions:
-                if sub.get("type") == "web":
-                    # Web Push subscription
-                    subscription_info = {
-                        "endpoint": sub.get("endpoint"),
-                        "keys": {
-                            "p256dh": sub.get("p256dh"),
-                            "auth": sub.get("auth")
-                        }
-                    }
-                    send_web_push_notification(subscription_info, title, body)
-                elif sub.get("type") == "fcm" and sub.get("fcm_token"):
-                    # FCM token for native app
-                    send_fcm_notification(sub.get("fcm_token"), title, body)
-        return True
-    except Exception as e:
-        logger.error(f"Error sending push notification to user {username}: {e}")
-        return False
-
-@app.options("/{full_path:path}")
-async def options_handler(full_path: str):
-    """Handle CORS preflight requests for all paths"""
-    return JSONResponse(
-        content={},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-            "Access-Control-Max-Age": "3600",
-        }
-    )
 
 @app.get("/")
 def root():
@@ -2745,31 +2589,7 @@ async def create_maintenance_task(request: Request):
         resp.raise_for_status()
         if resp.text:
             body = resp.json()
-            result = body[0] if isinstance(body, list) and body else body
-            
-            # Send push notification if task was assigned
-            if "assigned_to" in data and data["assigned_to"]:
-                assigned_to = data["assigned_to"]
-                # Get username from user ID if needed
-                user_resp = requests.get(
-                    f"{REST_URL}/users",
-                    headers=SERVICE_HEADERS,
-                    params={"id": f"eq.{assigned_to}", "select": "username"}
-                )
-                username = assigned_to  # Default to ID
-                if user_resp.status_code == 200:
-                    users = user_resp.json() or []
-                    if users:
-                        username = users[0].get("username", assigned_to)
-                
-                task_title = result.get("title", "ללא כותרת")
-                send_push_notification_to_user(
-                    username,
-                    "משימה חדשה הוקצתה לך",
-                    f"משימת תחזוקה חדשה: {task_title}"
-                )
-            
-            return result
+            return body[0] if isinstance(body, list) and body else body
         return data
     except requests.exceptions.HTTPError as e:
         error_detail = f"HTTP {e.response.status_code}: {e.response.text[:400]}" if e.response else str(e)
@@ -2808,17 +2628,6 @@ def update_maintenance_task(task_id: str, payload: dict):
     if not data:
         return {"message": "No changes provided"}
     try:
-        # Get previous task to check if assigned_to changed
-        prev_resp = requests.get(
-            f"{REST_URL}/maintenance_tasks?id=eq.{task_id}",
-            headers=SERVICE_HEADERS
-        )
-        prev_task = None
-        if prev_resp.status_code == 200:
-            prev_tasks = prev_resp.json() or []
-            if prev_tasks:
-                prev_task = prev_tasks[0]
-        
         headers = {**SERVICE_HEADERS, "Prefer": "return=representation"}
         resp = requests.patch(
             f"{REST_URL}/maintenance_tasks?id=eq.{task_id}",
@@ -2828,35 +2637,7 @@ def update_maintenance_task(task_id: str, payload: dict):
         resp.raise_for_status()
         if resp.text:
             result = resp.json()
-            updated_task = result[0] if isinstance(result, list) and result else result
-            
-            # Send push notification if task was assigned to someone
-            if "assigned_to" in data and data["assigned_to"]:
-                assigned_to = data["assigned_to"]
-                prev_assigned = prev_task.get("assigned_to") if prev_task else None
-                
-                # Only send if assignment changed
-                if assigned_to != prev_assigned:
-                    # Get username from user ID if needed
-                    user_resp = requests.get(
-                        f"{REST_URL}/users",
-                        headers=SERVICE_HEADERS,
-                        params={"id": f"eq.{assigned_to}", "select": "username"}
-                    )
-                    username = assigned_to  # Default to ID
-                    if user_resp.status_code == 200:
-                        users = user_resp.json() or []
-                        if users:
-                            username = users[0].get("username", assigned_to)
-                    
-                    task_title = updated_task.get("title", "ללא כותרת")
-                    send_push_notification_to_user(
-                        username,
-                        "משימה חדשה הוקצתה לך",
-                        f"משימת תחזוקה חדשה: {task_title}"
-                    )
-            
-            return updated_task
+            return result[0] if isinstance(result, list) and result else result
         return {"id": task_id, "message": "Updated successfully"}
     except requests.exceptions.HTTPError as e:
         error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
@@ -2982,17 +2763,6 @@ async def api_update_maintenance_task(request: Request, task_id: str):
         if not data:
             return {"message": "No changes provided"}
         
-        # Get previous task to check if assigned_to changed
-        prev_resp = requests.get(
-            f"{REST_URL}/maintenance_tasks?id=eq.{task_id}",
-            headers=SERVICE_HEADERS
-        )
-        prev_task = None
-        if prev_resp.status_code == 200:
-            prev_tasks = prev_resp.json() or []
-            if prev_tasks:
-                prev_task = prev_tasks[0]
-        
         # Update in Supabase
         headers = {**SERVICE_HEADERS, "Prefer": "return=representation"}
         resp = requests.patch(
@@ -3003,35 +2773,7 @@ async def api_update_maintenance_task(request: Request, task_id: str):
         resp.raise_for_status()
         if resp.text:
             result = resp.json()
-            updated_task = result[0] if isinstance(result, list) and result else result
-            
-            # Send push notification if task was assigned to someone
-            if "assigned_to" in data and data["assigned_to"]:
-                assigned_to = data["assigned_to"]
-                prev_assigned = prev_task.get("assigned_to") if prev_task else None
-                
-                # Only send if assignment changed
-                if assigned_to != prev_assigned:
-                    # Get username from user ID if needed
-                    user_resp = requests.get(
-                        f"{REST_URL}/users",
-                        headers=SERVICE_HEADERS,
-                        params={"id": f"eq.{assigned_to}", "select": "username"}
-                    )
-                    username = assigned_to  # Default to ID
-                    if user_resp.status_code == 200:
-                        users = user_resp.json() or []
-                        if users:
-                            username = users[0].get("username", assigned_to)
-                    
-                    task_title = updated_task.get("title", "ללא כותרת")
-                    send_push_notification_to_user(
-                        username,
-                        "משימה חדשה הוקצתה לך",
-                        f"משימת תחזוקה חדשה: {task_title}"
-                    )
-            
-            return updated_task
+            return result[0] if isinstance(result, list) and result else result
         return {"id": task_id, "message": "Updated successfully"}
     except requests.exceptions.HTTPError as e:
         error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
@@ -3758,29 +3500,14 @@ def api_send_chat_message(payload: dict):
         resp.raise_for_status()
         if resp.text:
             body = resp.json()
-            result = body[0] if isinstance(body, list) and body else result
+            result = body[0] if isinstance(body, list) and body else body
             
-            # Send push notifications to all users except sender
-            sender = data.get("sender", "")
-            if sender:
-                # Get all users
-                users_resp = requests.get(
-                    f"{REST_URL}/users",
-                    headers=SERVICE_HEADERS,
-                    params={"select": "username"}
-                )
-                if users_resp.status_code == 200:
-                    users = users_resp.json() or []
-                    for user in users:
-                        user_username = user.get("username", "")
-                        if user_username and user_username != sender:
-                            message_content = data.get("content", "")
-                            message_preview = message_content[:50] + "..." if len(message_content) > 50 else message_content
-                            send_push_notification_to_user(
-                                user_username,
-                                f"הודעה חדשה מ-{sender}",
-                                message_preview
-                            )
+            # TODO: Send push notifications to all users except sender
+            # This would require:
+            # 1. User device tokens stored in database
+            # 2. FCM/APNS setup
+            # 3. Notification service integration
+            # For now, frontend will handle local notifications
             
             return result
         return data
@@ -3791,120 +3518,6 @@ def api_send_chat_message(payload: dict):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error sending chat message: {str(e)}")
-
-# Push notification endpoints
-@app.post("/api/push/subscribe")
-def subscribe_push(payload: PushSubscriptionRequest):
-    """Register a push subscription for a user"""
-    try:
-        if not payload.username:
-            raise HTTPException(status_code=400, detail="username is required")
-        if payload.type not in ["web", "fcm"]:
-            raise HTTPException(status_code=400, detail="type must be 'web' or 'fcm'")
-        
-        subscription_data = {
-            "username": payload.username,
-            "type": payload.type,
-            "created_at": datetime.now().isoformat()
-        }
-        
-        if payload.type == "web":
-            if not payload.subscription:
-                raise HTTPException(status_code=400, detail="subscription is required for web push")
-            subscription_data["endpoint"] = payload.subscription.endpoint
-            subscription_data["p256dh"] = payload.subscription.keys.get("p256dh", "")
-            subscription_data["auth"] = payload.subscription.keys.get("auth", "")
-        elif payload.type == "fcm":
-            if not payload.fcm_token:
-                raise HTTPException(status_code=400, detail="fcm_token is required for FCM")
-            subscription_data["fcm_token"] = payload.fcm_token
-        
-        # Check if subscription already exists (by endpoint for web, fcm_token for FCM)
-        check_field = "endpoint" if payload.type == "web" else "fcm_token"
-        check_value = subscription_data.get(check_field)
-        if check_value:
-            check_resp = requests.get(
-                f"{REST_URL}/push_subscriptions",
-                headers=SERVICE_HEADERS,
-                params={check_field: f"eq.{check_value}", "select": "id"}
-            )
-            if check_resp.status_code == 200:
-                existing = check_resp.json() or []
-                if existing:
-                    # Update existing subscription
-                    sub_id = existing[0]["id"]
-                    update_resp = requests.patch(
-                        f"{REST_URL}/push_subscriptions?id=eq.{sub_id}",
-                        headers=SERVICE_HEADERS,
-                        json=subscription_data
-                    )
-                    update_resp.raise_for_status()
-                    return {"message": "Subscription updated", "id": sub_id}
-        
-        # Create new subscription
-        subscription_data["id"] = str(uuid.uuid4())
-        resp = requests.post(
-            f"{REST_URL}/push_subscriptions",
-            headers=SERVICE_HEADERS,
-            json=subscription_data
-        )
-        resp.raise_for_status()
-        if resp.text:
-            body = resp.json()
-            return body[0] if isinstance(body, list) and body else body
-        return subscription_data
-    except requests.exceptions.HTTPError as e:
-        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:400]}" if e.response else str(e)
-        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error subscribing to push: {str(e)}")
-
-@app.post("/api/push/unsubscribe")
-def unsubscribe_push(payload: dict):
-    """Unregister a push subscription"""
-    try:
-        username = payload.get("username")
-        subscription_id = payload.get("subscription_id")
-        endpoint = payload.get("endpoint")
-        fcm_token = payload.get("fcm_token")
-        
-        if not username:
-            raise HTTPException(status_code=400, detail="username is required")
-        
-        # Build delete query
-        params = {"username": f"eq.{username}"}
-        if subscription_id:
-            params["id"] = f"eq.{subscription_id}"
-        elif endpoint:
-            params["endpoint"] = f"eq.{endpoint}"
-        elif fcm_token:
-            params["fcm_token"] = f"eq.{fcm_token}"
-        else:
-            raise HTTPException(status_code=400, detail="subscription_id, endpoint, or fcm_token is required")
-        
-        resp = requests.delete(
-            f"{REST_URL}/push_subscriptions",
-            headers=SERVICE_HEADERS,
-            params=params
-        )
-        resp.raise_for_status()
-        return {"message": "Unsubscribed successfully"}
-    except requests.exceptions.HTTPError as e:
-        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:400]}" if e.response else str(e)
-        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error unsubscribing from push: {str(e)}")
-
-@app.get("/api/push/vapid-public-key")
-def get_vapid_public_key():
-    """Get VAPID public key for Web Push registration"""
-    if not VAPID_PUBLIC_KEY:
-        raise HTTPException(status_code=503, detail="VAPID keys not configured")
-    return {"publicKey": VAPID_PUBLIC_KEY}
 
 @app.get("/attendance/logs")
 def attendance_logs():
