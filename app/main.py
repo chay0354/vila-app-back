@@ -10,8 +10,6 @@ import json
 from datetime import datetime
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.cors import CORSMiddleware as StarletteCORSMiddleware
-from starlette.middleware import Middleware
 from .supabase_client import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 import pywebpush
 import logging
@@ -20,19 +18,16 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+app = FastAPI(title="bolavila-backend")
+
 # Configure CORS to allow all origins
-app = FastAPI(
-    title="bolavila-backend",
-    middleware=[
-        Middleware(
-            StarletteCORSMiddleware,
-            allow_origins=["*"],
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-            expose_headers=["*"],
-        )
-    ]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 REST_URL = f"{SUPABASE_URL}/rest/v1"
