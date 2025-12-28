@@ -152,6 +152,19 @@ def send_push_notification_to_user(username: str, title: str, body: str):
         logger.error(f"Error sending push notification to user {username}: {e}")
         return False
 
+@app.options("/{full_path:path}")
+async def options_handler(full_path: str):
+    """Handle CORS preflight requests for all paths"""
+    return JSONResponse(
+        content={},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Allow-Credentials": "true",
+        }
+    )
+
 @app.get("/")
 def root():
     return {"message": "bolavila-backend API", "status": "running", "docs": "/docs"}
