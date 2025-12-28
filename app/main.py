@@ -10,6 +10,9 @@ import json
 from datetime import datetime
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
+from starlette.responses import Response
 from .supabase_client import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 import pywebpush
 import logging
@@ -20,14 +23,35 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="bolavila-backend")
 
-# Configure CORS to allow all origins
-# Note: Cannot use allow_origins=["*"] with allow_credentials=True
-# So we'll allow credentials but use a wildcard pattern that works
+# Custom middleware to handle CORS preflight requests explicitly
+class CORSPreflightMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: StarletteRequest, call_next):
+        if request.method == "OPTIONS":
+            return Response(
+                content="",
+                status_code=200,
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD",
+                    "Access-Control-Allow-Headers": "*",
+                    "Access-Control-Max-Age": "3600",
+                }
+            )
+        response = await call_next(request)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD"
+        response.headers["Access-Control-Allow-Headers"] = "*"
+        return response
+
+# Add custom CORS middleware first (runs before other middleware)
+app.add_middleware(CORSPreflightMiddleware)
+
+# Also add FastAPI's CORS middleware as backup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins
-    allow_credentials=False,  # Set to False when using wildcard
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
     max_age=3600,
