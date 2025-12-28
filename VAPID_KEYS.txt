@@ -1,0 +1,16 @@
+VAPID Keys for Web Push Notifications
+=====================================
+
+Add these to your backend .env file or Vercel environment variables:
+
+VAPID_PUBLIC_KEY=BBfRyuHtUbJ5XoZyBsHhgCcCU7SqrrkjxDPZY4ZpkCtOrjyaXLbTLaqaZkhPNi3pv0zDzuG-jSVj_X2qGRHbw1M
+VAPID_PRIVATE_KEY=KfWmS7BmwCBCOqRrv7J25ouFDmfqlbkmLk5RRGtCkdM
+VAPID_EMAIL=mailto:admin@bolavilla.com
+
+IMPORTANT:
+- VAPID_PUBLIC_KEY: Safe to expose to frontend (already exposed via /api/push/vapid-key)
+- VAPID_PRIVATE_KEY: Keep secret! Only on backend.
+- VAPID_EMAIL: Contact email for VAPID (can be any valid mailto: URL)
+
+These keys were generated on: 2025-12-28
+

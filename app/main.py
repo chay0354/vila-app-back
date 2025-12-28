@@ -12,6 +12,14 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from .supabase_client import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
+# Try to import pywebpush for Web Push notifications
+try:
+    from pywebpush import webpush, WebPushException
+    WEB_PUSH_AVAILABLE = True
+except ImportError:
+    WEB_PUSH_AVAILABLE = False
+    print("Warning: pywebpush not installed. Web Push notifications will not work.")
+
 app = FastAPI(title="bolavila-backend")
 
 app.add_middleware(
@@ -4375,12 +4383,54 @@ def send_push_notification(payload: SendNotificationRequest):
         if not tokens:
             return {"message": "No push tokens found", "sent": 0}
         
-        # Send notifications
-        # Note: For production, you would integrate with FCM/APNS for native apps
-        # and Web Push API for PWA. For now, we'll store the notification intent.
-        # The actual sending would be done via:
-        # - FCM API for Android/iOS
-        # - Web Push API for PWA
+        # Send Web Push notifications for PWA
+        sent_count = 0
+        vapid_private_key = os.getenv("VAPID_PRIVATE_KEY")
+        vapid_public_key = os.getenv("VAPID_PUBLIC_KEY")
+        vapid_email = os.getenv("VAPID_EMAIL", "mailto:admin@bolavilla.com")
+        
+        for token_data in tokens:
+            if token_data.get("platform") == "web":
+                try:
+                    # Try to decode as Web Push subscription
+                    token = token_data.get("token", "")
+                    try:
+                        # Decode base64 subscription
+                        import base64
+                        subscription_json = base64.b64decode(token + "==").decode('utf-8')
+                        subscription = json.loads(subscription_json)
+                        
+                        # Send Web Push notification
+                        if vapid_private_key and vapid_public_key and WEB_PUSH_AVAILABLE:
+                            try:
+                                webpush(
+                                    subscription_info=subscription,
+                                    data=json.dumps({
+                                        "title": payload.title,
+                                        "body": payload.body,
+                                        "icon": "/app-icon.jpg",
+                                        "data": payload.data or {}
+                                    }),
+                                    vapid_private_key=vapid_private_key,
+                                    vapid_claims={
+                                        "sub": vapid_email
+                                    }
+                                )
+                                sent_count += 1
+                            except WebPushException as e:
+                                print(f"Web Push error: {str(e)}")
+                                # Token might be invalid, continue with other tokens
+                                pass
+                    except (ValueError, json.JSONDecodeError, KeyError):
+                        # Not a Web Push subscription, skip
+                        pass
+                    except Exception as e:
+                        print(f"Error sending Web Push: {str(e)}")
+                        # Continue with other tokens
+                        pass
+                except Exception as e:
+                    print(f"Error processing token: {str(e)}")
+                    continue
         
         # Store notification in database for tracking
         notification_data = {
@@ -4405,8 +4455,9 @@ def send_push_notification(payload: SendNotificationRequest):
             pass
         
         return {
-            "message": f"Notification queued for {len(tokens)} device(s)",
-            "sent": len(tokens),
+            "message": f"Notification sent to {sent_count} device(s), queued for {len(tokens)} device(s)",
+            "sent": sent_count,
+            "queued": len(tokens),
             "tokens": len(tokens)
         }
     except requests.exceptions.HTTPError as e:
@@ -4425,4 +4476,12 @@ def api_register_push_token(payload: PushTokenRequest):
 def api_send_push_notification(payload: SendNotificationRequest):
     """Alias for /push/send to match frontend expectations"""
     return send_push_notification(payload)
+
+@app.get("/api/push/vapid-key")
+def get_vapid_public_key():
+    """Get VAPID public key for Web Push subscription"""
+    vapid_public_key = os.getenv("VAPID_PUBLIC_KEY")
+    if not vapid_public_key:
+        raise HTTPException(status_code=503, detail="VAPID keys not configured")
+    return {"publicKey": vapid_public_key}
 
