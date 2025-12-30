@@ -20,6 +20,31 @@ except ImportError:
     WEB_PUSH_AVAILABLE = False
     print("Warning: pywebpush not installed. Web Push notifications will not work.")
 
+# Try to import firebase-admin for FCM notifications
+try:
+    import firebase_admin
+    from firebase_admin import credentials, messaging as fcm_messaging
+    FCM_AVAILABLE = True
+    
+    # Initialize Firebase Admin (will use FIREBASE_CREDENTIALS env var or default)
+    try:
+        if not firebase_admin._apps:
+            # Try to initialize with credentials from environment
+            cred_json = os.getenv("FIREBASE_CREDENTIALS")
+            if cred_json:
+                cred_dict = json.loads(cred_json)
+                cred = credentials.Certificate(cred_dict)
+                firebase_admin.initialize_app(cred)
+            else:
+                # Try default initialization (for Google Cloud environments)
+                firebase_admin.initialize_app()
+    except Exception as e:
+        print(f"Warning: Firebase Admin not initialized: {str(e)}")
+        FCM_AVAILABLE = False
+except ImportError:
+    FCM_AVAILABLE = False
+    print("Warning: firebase-admin not installed. FCM notifications will not work.")
+
 app = FastAPI(title="bolavila-backend")
 
 app.add_middleware(
@@ -4383,53 +4408,128 @@ def send_push_notification(payload: SendNotificationRequest):
         if not tokens:
             return {"message": "No push tokens found", "sent": 0}
         
-        # Send Web Push notifications for PWA
+        # Send notifications via appropriate service
         sent_count = 0
         vapid_private_key = os.getenv("VAPID_PRIVATE_KEY")
         vapid_public_key = os.getenv("VAPID_PUBLIC_KEY")
         vapid_email = os.getenv("VAPID_EMAIL", "mailto:admin@bolavilla.com")
+        fcm_server_key = os.getenv("FCM_SERVER_KEY")  # Legacy FCM server key
         
         for token_data in tokens:
-            if token_data.get("platform") == "web":
+            platform = token_data.get("platform")
+            token = token_data.get("token", "")
+            
+            # Send FCM notification for Android
+            if platform == "android" and FCM_AVAILABLE and token:
                 try:
-                    # Try to decode as Web Push subscription
-                    token = token_data.get("token", "")
-                    try:
-                        # Decode base64 subscription
-                        import base64
-                        subscription_json = base64.b64decode(token + "==").decode('utf-8')
-                        subscription = json.loads(subscription_json)
-                        
-                        # Send Web Push notification
-                        if vapid_private_key and vapid_public_key and WEB_PUSH_AVAILABLE:
-                            try:
-                                webpush(
-                                    subscription_info=subscription,
-                                    data=json.dumps({
-                                        "title": payload.title,
-                                        "body": payload.body,
-                                        "icon": "/app-icon.jpg",
-                                        "data": payload.data or {}
-                                    }),
-                                    vapid_private_key=vapid_private_key,
-                                    vapid_claims={
-                                        "sub": vapid_email
-                                    }
-                                )
-                                sent_count += 1
-                            except WebPushException as e:
-                                print(f"Web Push error: {str(e)}")
-                                # Token might be invalid, continue with other tokens
-                                pass
-                    except (ValueError, json.JSONDecodeError, KeyError):
-                        # Not a Web Push subscription, skip
-                        pass
-                    except Exception as e:
-                        print(f"Error sending Web Push: {str(e)}")
-                        # Continue with other tokens
-                        pass
+                    # Use Firebase Admin SDK to send FCM message
+                    message = fcm_messaging.Message(
+                        token=token,
+                        notification=fcm_messaging.Notification(
+                            title=payload.title,
+                            body=payload.body,
+                        ),
+                        data=payload.data or {},
+                        android=fcm_messaging.AndroidConfig(
+                            priority="high",
+                            notification=fcm_messaging.AndroidNotification(
+                                channel_id="default",
+                                sound="default",
+                            ),
+                        ),
+                    )
+                    response = fcm_messaging.send(message)
+                    print(f"FCM message sent: {response}")
+                    sent_count += 1
                 except Exception as e:
-                    print(f"Error processing token: {str(e)}")
+                    print(f"FCM error: {str(e)}")
+                    # Try legacy FCM API with server key
+                    if fcm_server_key:
+                        try:
+                            fcm_url = "https://fcm.googleapis.com/fcm/send"
+                            fcm_headers = {
+                                "Authorization": f"key={fcm_server_key}",
+                                "Content-Type": "application/json",
+                            }
+                            fcm_payload = {
+                                "to": token,
+                                "notification": {
+                                    "title": payload.title,
+                                    "body": payload.body,
+                                },
+                                "data": payload.data or {},
+                                "priority": "high",
+                            }
+                            fcm_resp = requests.post(fcm_url, headers=fcm_headers, json=fcm_payload, timeout=10)
+                            if fcm_resp.status_code == 200:
+                                sent_count += 1
+                        except Exception as legacy_error:
+                            print(f"Legacy FCM error: {str(legacy_error)}")
+                    continue
+            
+            # Send Web Push notification for PWA
+            if platform == "web":
+                try:
+                    token = token_data.get("token", "")
+                    if not token:
+                        continue
+                    
+                    # Parse subscription JSON (should be direct JSON, not base64)
+                    try:
+                        subscription = json.loads(token)
+                    except json.JSONDecodeError:
+                        # Try base64 decode for backward compatibility
+                        try:
+                            import base64
+                            subscription_json = base64.b64decode(token + "==").decode('utf-8')
+                            subscription = json.loads(subscription_json)
+                        except (ValueError, json.JSONDecodeError):
+                            print(f"Invalid subscription format for user {token_data.get('username')}")
+                            continue
+                    
+                    # Validate subscription has required fields
+                    if not isinstance(subscription, dict) or 'endpoint' not in subscription:
+                        print(f"Invalid subscription structure for user {token_data.get('username')}")
+                        continue
+                    
+                    # Send Web Push notification using pywebpush (same protocol as web-push npm)
+                    if vapid_private_key and vapid_public_key and WEB_PUSH_AVAILABLE:
+                        try:
+                            # Prepare notification payload
+                            notification_payload = {
+                                "title": payload.title,
+                                "body": payload.body,
+                                "icon": "/app-icon.jpg",
+                                "badge": "/app-icon.jpg",
+                                "tag": "notification",
+                                "requireInteraction": False,
+                                "data": payload.data or {}
+                            }
+                            
+                            # Send using pywebpush (implements Web Push Protocol, same as web-push npm)
+                            # pywebpush uses the same Web Push Protocol as web-push npm package
+                            webpush(
+                                subscription_info=subscription,
+                                data=json.dumps(notification_payload),
+                                vapid_private_key=vapid_private_key,
+                                vapid_claims={
+                                    "sub": vapid_email
+                                },
+                                ttl=86400,  # 24 hours - how long push service should retain message
+                            )
+                            print(f"Web Push sent successfully to {subscription.get('endpoint', 'unknown')[:50]}...")
+                            sent_count += 1
+                        except WebPushException as e:
+                            print(f"Web Push error: {str(e)}")
+                            # Token might be invalid/expired, continue with other tokens
+                            continue
+                        except Exception as e:
+                            print(f"Unexpected Web Push error: {str(e)}")
+                            continue
+                    else:
+                        print("VAPID keys not configured or pywebpush not available")
+                except Exception as e:
+                    print(f"Error processing web push token: {str(e)}")
                     continue
         
         # Store notification in database for tracking
@@ -4455,9 +4555,9 @@ def send_push_notification(payload: SendNotificationRequest):
             pass
         
         return {
-            "message": f"Notification sent to {sent_count} device(s), queued for {len(tokens)} device(s)",
+            "message": f"Notification sent to {sent_count} device(s) via push services, {len(tokens)} total device(s) registered",
             "sent": sent_count,
-            "queued": len(tokens),
+            "total_tokens": len(tokens),
             "tokens": len(tokens)
         }
     except requests.exceptions.HTTPError as e:
