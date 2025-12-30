@@ -2622,7 +2622,30 @@ async def create_maintenance_task(request: Request):
         resp.raise_for_status()
         if resp.text:
             body = resp.json()
-            return body[0] if isinstance(body, list) and body else body
+            result = body[0] if isinstance(body, list) and body else body
+            
+            # Send push notification if task is assigned to a user
+            assigned_to = data.get("assigned_to") or result.get("assigned_to")
+            if assigned_to:
+                task_title = data.get("title") or result.get("title", "משימת תחזוקה חדשה")
+                print(f"📱 Sending push notification for new task assignment to: {assigned_to}")
+                print(f"   Task: {task_title}")
+                # Convert user ID to username (push tokens are stored by username)
+                username = get_username_from_id(assigned_to)
+                if username:
+                    push_result = send_push_to_user(
+                        username=username,
+                        title="משימת תחזוקה חדשה",
+                        body=f"הוקצתה לך משימה: {task_title}",
+                        data={"type": "maintenance_task", "task_id": result.get("id")}
+                    )
+                    print(f"   Push result: {push_result}")
+                else:
+                    print(f"   ⚠️ Could not resolve username for assigned_to: {assigned_to}")
+            else:
+                print(f"⚠️ No assigned_to found, skipping push notification")
+            
+            return result
         return data
     except requests.exceptions.HTTPError as e:
         error_detail = f"HTTP {e.response.status_code}: {e.response.text[:400]}" if e.response else str(e)
@@ -2662,6 +2685,14 @@ def update_maintenance_task(task_id: str, payload: dict):
         return {"message": "No changes provided"}
     try:
         headers = {**SERVICE_HEADERS, "Prefer": "return=representation"}
+        
+        # Check if assigned_to is being updated
+        assigned_to = data.get("assignedTo") or data.get("assigned_to")
+        if assigned_to:
+            # Normalize to snake_case
+            if "assignedTo" in data:
+                data["assigned_to"] = data.pop("assignedTo")
+        
         resp = requests.patch(
             f"{REST_URL}/maintenance_tasks?id=eq.{task_id}",
             headers=headers,
@@ -2785,10 +2816,16 @@ async def api_update_maintenance_task(request: Request, task_id: str):
             data["unit_id"] = data.pop("unitId")
         if "createdDate" in data:
             data["created_date"] = data.pop("createdDate")
+        
+        # Check if assigned_to is being updated
+        assigned_to = None
         if "assignedTo" in data:
             assigned_value = data.pop("assignedTo")
             if assigned_value:
                 data["assigned_to"] = assigned_value
+                assigned_to = assigned_value
+        elif "assigned_to" in data:
+            assigned_to = data.get("assigned_to")
         
         # Remove None values
         data = {k: v for k, v in data.items() if v is not None}
@@ -2806,7 +2843,29 @@ async def api_update_maintenance_task(request: Request, task_id: str):
         resp.raise_for_status()
         if resp.text:
             result = resp.json()
-            return result[0] if isinstance(result, list) and result else result
+            updated_task = result[0] if isinstance(result, list) and result else result
+            
+            # Send push notification if task was assigned to a user
+            if assigned_to:
+                task_title = updated_task.get("title", "משימת תחזוקה")
+                print(f"📱 Sending push notification for updated task assignment to: {assigned_to}")
+                print(f"   Task: {task_title}")
+                # Convert user ID to username (push tokens are stored by username)
+                username = get_username_from_id(assigned_to)
+                if username:
+                    push_result = send_push_to_user(
+                        username=username,
+                        title="משימת תחזוקה חדשה",
+                        body=f"הוקצתה לך משימה: {task_title}",
+                        data={"type": "maintenance_task", "task_id": task_id}
+                    )
+                    print(f"   Push result: {push_result}")
+                else:
+                    print(f"   ⚠️ Could not resolve username for assigned_to: {assigned_to}")
+            else:
+                print(f"⚠️ No assigned_to in update, skipping push notification")
+            
+            return updated_task
         return {"id": task_id, "message": "Updated successfully"}
     except requests.exceptions.HTTPError as e:
         error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
@@ -3535,12 +3594,46 @@ def api_send_chat_message(payload: dict):
             body = resp.json()
             result = body[0] if isinstance(body, list) and body else body
             
-            # TODO: Send push notifications to all users except sender
-            # This would require:
-            # 1. User device tokens stored in database
-            # 2. FCM/APNS setup
-            # 3. Notification service integration
-            # For now, frontend will handle local notifications
+            # Send push notifications to all users except sender
+            sender = data.get("sender", "")
+            message_content = data.get("content", "")
+            
+            if sender and message_content:
+                # Get all registered push tokens
+                try:
+                    print(f"💬 Sending push notifications for chat message from: {sender}")
+                    tokens_resp = requests.get(
+                        f"{REST_URL}/push_tokens",
+                        headers=SERVICE_HEADERS,
+                        params={"select": "username,token,platform"}
+                    )
+                    tokens_resp.raise_for_status()
+                    all_tokens = tokens_resp.json() or []
+                    print(f"   Found {len(all_tokens)} registered push tokens")
+                    
+                    # Send to all users except sender
+                    sent_count = 0
+                    for token_data in all_tokens:
+                        token_username = token_data.get("username", "")
+                        if token_username and token_username != sender:
+                            print(f"   Sending to: {token_username}")
+                            push_result = send_push_to_user(
+                                username=token_username,
+                                title=f"הודעה חדשה מ-{sender}",
+                                body=message_content[:100],  # Limit body length
+                                data={
+                                    "type": "chat_message",
+                                    "sender": sender,
+                                    "message_id": result.get("id")
+                                }
+                            )
+                            sent_count += push_result.get("sent", 0)
+                            print(f"     Result: {push_result}")
+                    print(f"   ✅ Sent {sent_count} chat notifications")
+                except Exception as e:
+                    print(f"❌ Error sending chat push notifications: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
             
             return result
         return data
@@ -4329,6 +4422,59 @@ class SendNotificationRequest(BaseModel):
     username: Optional[str] = None  # If None, send to all users
     data: Optional[dict] = None
 
+# Helper function to get username from user ID
+def get_username_from_id(user_id: str) -> Optional[str]:
+    """Convert user ID to username by querying the users table"""
+    try:
+        if not user_id:
+            return None
+        
+        # Check if it's already a username (not a UUID format)
+        # UUIDs are typically 36 characters with dashes: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        if len(user_id) < 30 or '-' not in user_id:
+            # Likely already a username, return as-is
+            return user_id
+        
+        # Query users table by ID
+        resp = requests.get(
+            f"{REST_URL}/users",
+            headers=SERVICE_HEADERS,
+            params={"id": f"eq.{user_id}", "select": "username"}
+        )
+        resp.raise_for_status()
+        users = resp.json() or []
+        
+        if users and len(users) > 0:
+            username = users[0].get("username")
+            print(f"   → Converted user ID {user_id[:20]}... to username: {username}")
+            return username
+        else:
+            print(f"   ⚠️ User ID {user_id[:20]}... not found, treating as username")
+            return user_id  # Fallback: treat as username if not found
+    except Exception as e:
+        print(f"   ⚠️ Error converting user ID to username: {str(e)}, treating as username")
+        return user_id  # Fallback: treat as username on error
+
+# Helper function to send push notification to a user
+def send_push_to_user(username: str, title: str, body: str, data: Optional[dict] = None):
+    """Helper function to send push notification to a specific user"""
+    try:
+        print(f"   → Calling send_push_notification for user: {username}")
+        notification_payload = SendNotificationRequest(
+            title=title,
+            body=body,
+            username=username,
+            data=data
+        )
+        result = send_push_notification(notification_payload)
+        print(f"   → Push notification result: {result}")
+        return result
+    except Exception as e:
+        print(f"❌ Error sending push notification to {username}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {"sent": 0, "error": str(e)}
+
 @app.post("/push/register")
 def register_push_token(payload: PushTokenRequest):
     """
@@ -4439,12 +4585,60 @@ def send_push_notification(payload: SendNotificationRequest):
                         ),
                     )
                     response = fcm_messaging.send(message)
-                    print(f"FCM message sent: {response}")
+                    print(f"✅ FCM message sent: {response}")
                     sent_count += 1
                 except Exception as e:
-                    print(f"FCM error: {str(e)}")
-                    # Try legacy FCM API with server key
-                    if fcm_server_key:
+                    error_str = str(e).lower()
+                    error_msg = str(e)
+                    print(f"❌ FCM error: {error_msg}")
+                    
+                    # Check if token is invalid/unregistered
+                    # Firebase Admin SDK throws exceptions for invalid tokens
+                    is_invalid_token = (
+                        "invalid" in error_str or
+                        "not a valid" in error_str or
+                        "unregistered" in error_str or
+                        "registration" in error_str and "token" in error_str
+                    )
+                    
+                    if is_invalid_token:
+                        print(f"🗑️  Deleting invalid FCM token for user {token_data.get('username', 'unknown')}")
+                        try:
+                            # Delete invalid token from database
+                            # Find token by username, platform, and token value
+                            token_username = token_data.get("username", "")
+                            if token_username:
+                                # Query to find token ID
+                                find_resp = requests.get(
+                                    f"{REST_URL}/push_tokens",
+                                    headers=SERVICE_HEADERS,
+                                    params={
+                                        "username": f"eq.{token_username}",
+                                        "platform": f"eq.android",
+                                        "token": f"eq.{token}",
+                                        "select": "id"
+                                    }
+                                )
+                                find_resp.raise_for_status()
+                                token_records = find_resp.json() or []
+                                
+                                if token_records:
+                                    token_id = token_records[0].get("id")
+                                    # Delete the invalid token
+                                    delete_resp = requests.delete(
+                                        f"{REST_URL}/push_tokens",
+                                        headers=SERVICE_HEADERS,
+                                        params={"id": f"eq.{token_id}"}
+                                    )
+                                    delete_resp.raise_for_status()
+                                    print(f"✅ Deleted invalid token from database")
+                                else:
+                                    print(f"⚠️  Token not found in database to delete")
+                        except Exception as delete_error:
+                            print(f"⚠️  Failed to delete invalid token: {str(delete_error)}")
+                    
+                    # Try legacy FCM API with server key as fallback
+                    if fcm_server_key and not is_invalid_token:
                         try:
                             fcm_url = "https://fcm.googleapis.com/fcm/send"
                             fcm_headers = {
@@ -4463,6 +4657,10 @@ def send_push_notification(payload: SendNotificationRequest):
                             fcm_resp = requests.post(fcm_url, headers=fcm_headers, json=fcm_payload, timeout=10)
                             if fcm_resp.status_code == 200:
                                 sent_count += 1
+                            elif fcm_resp.status_code in [400, 404]:
+                                # Invalid token - delete it
+                                print(f"🗑️  Legacy FCM API reports invalid token, deleting...")
+                                # Same deletion logic as above
                         except Exception as legacy_error:
                             print(f"Legacy FCM error: {str(legacy_error)}")
                     continue
@@ -4471,25 +4669,50 @@ def send_push_notification(payload: SendNotificationRequest):
             if platform == "web":
                 try:
                     token = token_data.get("token", "")
+                    username = token_data.get("username", "unknown")
                     if not token:
+                        print(f"⚠️ Empty token for user {username}")
                         continue
                     
+                    print(f"📦 Processing token for user {username}")
+                    print(f"📦 Token length: {len(token)}, first 100 chars: {token[:100]}")
+                    
                     # Parse subscription JSON (should be direct JSON, not base64)
+                    subscription = None
                     try:
                         subscription = json.loads(token)
-                    except json.JSONDecodeError:
+                        print(f"✅ Successfully parsed subscription as JSON")
+                    except json.JSONDecodeError as e:
+                        print(f"⚠️ JSON parse failed: {str(e)}")
                         # Try base64 decode for backward compatibility
                         try:
                             import base64
                             subscription_json = base64.b64decode(token + "==").decode('utf-8')
                             subscription = json.loads(subscription_json)
-                        except (ValueError, json.JSONDecodeError):
-                            print(f"Invalid subscription format for user {token_data.get('username')}")
+                            print(f"✅ Successfully parsed subscription as base64+JSON")
+                        except (ValueError, json.JSONDecodeError) as e2:
+                            print(f"❌ Invalid subscription format for user {username}: {str(e2)}")
+                            print(f"   Token preview: {token[:200]}")
                             continue
                     
                     # Validate subscription has required fields
-                    if not isinstance(subscription, dict) or 'endpoint' not in subscription:
-                        print(f"Invalid subscription structure for user {token_data.get('username')}")
+                    if not isinstance(subscription, dict):
+                        print(f"❌ Subscription is not a dict for user {username}, type: {type(subscription)}")
+                        continue
+                    
+                    if 'endpoint' not in subscription:
+                        print(f"❌ Subscription missing 'endpoint' for user {username}")
+                        print(f"   Subscription keys: {list(subscription.keys())}")
+                        continue
+                    
+                    if 'keys' not in subscription:
+                        print(f"❌ Subscription missing 'keys' for user {username}")
+                        continue
+                    
+                    keys = subscription.get('keys', {})
+                    if 'p256dh' not in keys or 'auth' not in keys:
+                        print(f"❌ Subscription keys missing p256dh or auth for user {username}")
+                        print(f"   Keys present: {list(keys.keys())}")
                         continue
                     
                     # Send Web Push notification using pywebpush (same protocol as web-push npm)
@@ -4506,8 +4729,12 @@ def send_push_notification(payload: SendNotificationRequest):
                                 "data": payload.data or {}
                             }
                             
+                            print(f"Attempting to send Web Push to: {subscription.get('endpoint', 'unknown')[:50]}...")
+                            print(f"Subscription keys present: p256dh={bool(subscription.get('keys', {}).get('p256dh'))}, auth={bool(subscription.get('keys', {}).get('auth'))}")
+                            
                             # Send using pywebpush (implements Web Push Protocol, same as web-push npm)
                             # pywebpush uses the same Web Push Protocol as web-push npm package
+                            # Note: pywebpush only needs vapid_private_key (derives public key from it)
                             webpush(
                                 subscription_info=subscription,
                                 data=json.dumps(notification_payload),
@@ -4517,7 +4744,7 @@ def send_push_notification(payload: SendNotificationRequest):
                                 },
                                 ttl=86400,  # 24 hours - how long push service should retain message
                             )
-                            print(f"Web Push sent successfully to {subscription.get('endpoint', 'unknown')[:50]}...")
+                            print(f"✅ Web Push sent successfully to {subscription.get('endpoint', 'unknown')[:50]}...")
                             sent_count += 1
                         except WebPushException as e:
                             print(f"Web Push error: {str(e)}")
