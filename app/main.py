@@ -2633,11 +2633,13 @@ async def create_maintenance_task(request: Request):
                 # Convert user ID to username (push tokens are stored by username)
                 username = get_username_from_id(assigned_to)
                 if username:
+                    # Convert all data values to strings (FCM requirement)
+                    task_id = result.get("id")
                     push_result = send_push_to_user(
                         username=username,
                         title="משימת תחזוקה חדשה",
                         body=f"הוקצתה לך משימה: {task_title}",
-                        data={"type": "maintenance_task", "task_id": result.get("id")}
+                        data={"type": "maintenance_task", "task_id": str(task_id) if task_id is not None else ""}
                     )
                     print(f"   Push result: {push_result}")
                 else:
@@ -2853,11 +2855,12 @@ async def api_update_maintenance_task(request: Request, task_id: str):
                 # Convert user ID to username (push tokens are stored by username)
                 username = get_username_from_id(assigned_to)
                 if username:
+                    # Convert all data values to strings (FCM requirement)
                     push_result = send_push_to_user(
                         username=username,
                         title="משימת תחזוקה חדשה",
                         body=f"הוקצתה לך משימה: {task_title}",
-                        data={"type": "maintenance_task", "task_id": task_id}
+                        data={"type": "maintenance_task", "task_id": str(task_id) if task_id else ""}
                     )
                     print(f"   Push result: {push_result}")
                 else:
@@ -3595,13 +3598,16 @@ def api_send_chat_message(payload: dict):
             result = body[0] if isinstance(body, list) and body else body
             
             # Send push notifications to all users except sender
-            sender = data.get("sender", "")
+            sender_raw = data.get("sender", "")
             message_content = data.get("content", "")
             
-            if sender and message_content:
+            if sender_raw and message_content:
+                # Convert sender to username if it's a user ID (like we do for tasks)
+                sender_username = get_username_from_id(sender_raw)
+                print(f"💬 Sending push notifications for chat message from: {sender_raw} (username: {sender_username})")
+                
                 # Get all registered push tokens
                 try:
-                    print(f"💬 Sending push notifications for chat message from: {sender}")
                     tokens_resp = requests.get(
                         f"{REST_URL}/push_tokens",
                         headers=SERVICE_HEADERS,
@@ -3611,25 +3617,39 @@ def api_send_chat_message(payload: dict):
                     all_tokens = tokens_resp.json() or []
                     print(f"   Found {len(all_tokens)} registered push tokens")
                     
-                    # Send to all users except sender
-                    sent_count = 0
-                    for token_data in all_tokens:
-                        token_username = token_data.get("username", "")
-                        if token_username and token_username != sender:
-                            print(f"   Sending to: {token_username}")
+                    if len(all_tokens) == 0:
+                        print(f"   ⚠️  No push tokens registered - no notifications will be sent")
+                    else:
+                        # Send to all users except sender
+                        sent_count = 0
+                        skipped_count = 0
+                        for token_data in all_tokens:
+                            token_username = token_data.get("username", "")
+                            if not token_username:
+                                continue
+                            
+                            # Skip sender (compare both raw and username to handle both cases)
+                            if token_username == sender_username or token_username == sender_raw:
+                                skipped_count += 1
+                                continue
+                            
+                            print(f"   📱 Sending chat push to: {token_username}")
+                            # Convert all data values to strings (FCM requirement)
+                            message_id = result.get("id")
                             push_result = send_push_to_user(
                                 username=token_username,
-                                title=f"הודעה חדשה מ-{sender}",
+                                title=f"הודעה חדשה מ-{sender_username}",
                                 body=message_content[:100],  # Limit body length
                                 data={
                                     "type": "chat_message",
-                                    "sender": sender,
-                                    "message_id": result.get("id")
+                                    "sender": str(sender_username),
+                                    "message_id": str(message_id) if message_id is not None else ""
                                 }
                             )
                             sent_count += push_result.get("sent", 0)
-                            print(f"     Result: {push_result}")
-                    print(f"   ✅ Sent {sent_count} chat notifications")
+                            print(f"      → Result: {push_result.get('sent', 0)} sent, message: {push_result.get('message', '')}")
+                        
+                        print(f"   ✅ Chat push notifications: {sent_count} sent, {skipped_count} skipped (sender)")
                 except Exception as e:
                     print(f"❌ Error sending chat push notifications: {str(e)}")
                     import traceback
