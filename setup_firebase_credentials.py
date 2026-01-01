@@ -169,3 +169,6 @@ if __name__ == "__main__":
         print("  ❌ Failed to setup Firebase credentials")
         print("=" * 70)
 
+
+
+

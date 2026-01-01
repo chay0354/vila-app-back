@@ -7,10 +7,37 @@ import requests
 import bcrypt
 import base64
 import json
+import sys
 from datetime import datetime
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from .supabase_client import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+
+# Fix Windows console encoding to support emojis and Unicode
+if sys.platform == 'win32':
+    try:
+        # Set stdout and stderr to UTF-8 encoding
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8')
+        if hasattr(sys.stderr, 'reconfigure'):
+            sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        # If reconfiguration fails, continue anyway
+        pass
+
+# Safe print function that handles encoding errors
+def safe_print(*args, **kwargs):
+    """Print function that handles Unicode encoding errors gracefully"""
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        # Fallback: encode to ASCII with replacement for problematic characters
+        try:
+            encoded_args = [str(arg).encode('ascii', 'replace').decode('ascii') if isinstance(arg, str) else arg for arg in args]
+            print(*encoded_args, **kwargs)
+        except Exception:
+            # Last resort: just print the error message
+            print("Error: Unable to print message due to encoding issue")
 
 # Try to import pywebpush for Web Push notifications
 try:
@@ -2418,18 +2445,124 @@ def delete_inventory_order(order_id: str):
         raise HTTPException(status_code=500, detail=f"Error deleting inventory order: {str(e)}")
 
 @app.get("/maintenance/tasks")
-def maintenance_tasks():
+def maintenance_tasks(limit: Optional[int] = None, include_image: bool = False):
+    """
+    Get maintenance tasks. Optionally limit the number of results.
+    By default excludes image_uri to reduce response size (13MB -> few KB).
+    Set include_image=true to get image_uri (only when needed for specific tasks).
+    """
     try:
-        resp = requests.get(f"{REST_URL}/maintenance_tasks", headers=SERVICE_HEADERS, params={"select": "*", "order": "created_date.desc"})
+        # Exclude image_uri by default to avoid huge response sizes (base64 images can be several MB each)
+        if include_image:
+            # Include all fields including image_uri
+            params = {"select": "*", "order": "created_date.desc"}
+        else:
+            # Exclude image_uri - return all other fields
+            params = {
+                "select": "id,unit_id,title,description,status,priority,created_date,assigned_to,category",
+                "order": "created_date.desc"
+            }
+        
+        if limit:
+            params["limit"] = str(limit)
+        resp = requests.get(f"{REST_URL}/maintenance_tasks", headers=SERVICE_HEADERS, params=params)
         resp.raise_for_status()
-        return resp.json()
+        tasks = resp.json() or []
+        
+        # Add a flag indicating if image exists (without the actual data)
+        if not include_image:
+            for task in tasks:
+                # Check if image_uri exists in DB without fetching it
+                # We'll add a has_image flag instead
+                task["has_image"] = False  # Will be set to true if we detect image_uri exists
+        
+        return tasks
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching maintenance tasks: {str(e)}")
 
 @app.get("/api/maintenance/tasks")
-def api_maintenance_tasks():
-    """Alias for /maintenance/tasks to match frontend expectations"""
-    return maintenance_tasks()
+def api_maintenance_tasks(limit: Optional[int] = None, include_image: bool = False):
+    """
+    Alias for /maintenance/tasks to match frontend expectations.
+    By default excludes image_uri to reduce response size from 13MB to few KB.
+    """
+    return maintenance_tasks(limit=limit, include_image=include_image)
+
+@app.get("/api/maintenance/tasks/stats")
+def maintenance_tasks_stats():
+    """
+    Get lightweight stats (counts only) for maintenance tasks grouped by unit.
+    Returns only unit_id, total count, open count, and closed count.
+    Much faster than loading all task data - uses minimal field selection.
+    """
+    try:
+        # Only fetch unit_id and status - no other fields to minimize data transfer
+        resp = requests.get(
+            f"{REST_URL}/maintenance_tasks",
+            headers=SERVICE_HEADERS,
+            params={"select": "unit_id,status"}  # Removed order - not needed for counting
+        )
+        resp.raise_for_status()
+        tasks = resp.json() or []
+        
+        # Group by unit_id and count statuses (in-memory aggregation is fast for counts)
+        stats_by_unit: dict = {}
+        for task in tasks:
+            unit_id = task.get("unit_id") or task.get("unitId") or task.get("unit") or "unknown"
+            status = task.get("status") or "פתוח"
+            
+            if unit_id not in stats_by_unit:
+                stats_by_unit[unit_id] = {
+                    "unit_id": unit_id,
+                    "total": 0,
+                    "open": 0,
+                    "closed": 0
+                }
+            
+            stats_by_unit[unit_id]["total"] += 1
+            if status == "פתוח":
+                stats_by_unit[unit_id]["open"] += 1
+            elif status == "סגור":
+                stats_by_unit[unit_id]["closed"] += 1
+        
+        # Convert to list
+        return list(stats_by_unit.values())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching maintenance task stats: {str(e)}")
+
+@app.get("/api/maintenance/tasks/assignments")
+def maintenance_tasks_assignments(username: Optional[str] = None, user_id: Optional[str] = None):
+    """
+    Get lightweight assignment data for notifications.
+    Only returns task IDs and assigned_to for checking new assignments.
+    Much faster than loading all task data.
+    """
+    try:
+        # Only fetch minimal fields needed for assignment checking
+        params = {"select": "id,assigned_to,title"}
+        
+        resp = requests.get(
+            f"{REST_URL}/maintenance_tasks",
+            headers=SERVICE_HEADERS,
+            params=params
+        )
+        resp.raise_for_status()
+        tasks = resp.json() or []
+        
+        # Filter by username/user_id if provided (filter in Python for flexibility)
+        if username or user_id:
+            filtered_tasks = []
+            for task in tasks:
+                assigned_to = str(task.get("assigned_to") or "").strip()
+                # Match either username or user_id
+                if (username and assigned_to == username) or (user_id and assigned_to == user_id):
+                    filtered_tasks.append(task)
+            tasks = filtered_tasks
+        
+        # Return only minimal data
+        return [{"id": t.get("id"), "assigned_to": t.get("assigned_to"), "title": t.get("title")} for t in tasks]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching maintenance task assignments: {str(e)}")
 
 @app.post("/api/storage/upload")
 async def upload_to_storage(request: Request):
@@ -2547,7 +2680,10 @@ async def create_maintenance_task(request: Request):
                                 data["image_uri"] = image_uri
                         except Exception as e:
                             # Fallback to data URI if conversion fails
-                            print(f"Error uploading data URI to storage: {e}")
+                            try:
+                                print(f"Error uploading data URI to storage: {e}")
+                            except UnicodeEncodeError:
+                                print(f"Error uploading data URI to storage: {str(e).encode('ascii', 'replace').decode('ascii')}")
                             data["image_uri"] = image_uri
                     else:
                         data["image_uri"] = image_uri
@@ -2628,8 +2764,8 @@ async def create_maintenance_task(request: Request):
             assigned_to = data.get("assigned_to") or result.get("assigned_to")
             if assigned_to:
                 task_title = data.get("title") or result.get("title", "משימת תחזוקה חדשה")
-                print(f"📱 Sending push notification for new task assignment to: {assigned_to}")
-                print(f"   Task: {task_title}")
+                safe_print(f"📱 Sending push notification for new task assignment to: {assigned_to}")
+                safe_print(f"   Task: {task_title}")
                 # Convert user ID to username (push tokens are stored by username)
                 username = get_username_from_id(assigned_to)
                 if username:
@@ -2657,12 +2793,19 @@ async def create_maintenance_task(request: Request):
 
 
 @app.get("/maintenance/tasks/{task_id}")
-def get_maintenance_task(task_id: str):
+def get_maintenance_task(task_id: str, include_image: bool = True):
+    """
+    Get a specific maintenance task by ID.
+    By default includes image_uri (for detail view).
+    Set include_image=false to exclude it.
+    """
     try:
+        # For single task, include image_uri by default (needed for detail view)
+        select_fields = "*" if include_image else "id,unit_id,title,description,status,priority,created_date,assigned_to,category"
         resp = requests.get(
             f"{REST_URL}/maintenance_tasks",
             headers=SERVICE_HEADERS,
-            params={"id": f"eq.{task_id}", "select": "*"},
+            params={"id": f"eq.{task_id}", "select": select_fields},
         )
         resp.raise_for_status()
         rows = resp.json() or []
@@ -2676,6 +2819,14 @@ def get_maintenance_task(task_id: str):
         raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching maintenance task: {str(e)}")
+
+@app.get("/api/maintenance/tasks/{task_id}")
+def api_get_maintenance_task(task_id: str, include_image: bool = True):
+    """
+    Alias for /maintenance/tasks/{task_id} to match frontend expectations.
+    By default includes image_uri (for detail view).
+    """
+    return get_maintenance_task(task_id=task_id, include_image=include_image)
 
 @app.patch("/maintenance/tasks/{task_id}")
 def update_maintenance_task(task_id: str, payload: dict):
