@@ -143,12 +143,16 @@ def signup(payload: SignUpRequest):
         password_hash = bcrypt.hashpw(payload.password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
         
         # Create user
+        # Set approval_status: 'approved' for admin, 'pending' for others
+        approval_status = 'approved' if payload.username.lower() == 'admin' else 'pending'
+        
         user_data = {
             "id": str(uuid.uuid4()),
             "username": payload.username,
             "password_hash": password_hash,
             "role": payload.role or "עובד תחזוקה",
-            "image_url": payload.image_url
+            "image_url": payload.image_url,
+            "approval_status": approval_status
         }
         
         resp = requests.post(
@@ -170,7 +174,8 @@ def signup(payload: SignUpRequest):
             "username": user.get("username"),
             "role": user.get("role", "עובד תחזוקה"),
             "image_url": user.get("image_url"),
-            "message": "User created successfully"
+            "approval_status": approval_status,
+            "message": "User created successfully. Your account is pending approval." if approval_status == "pending" else "User created successfully"
         }
     except HTTPException:
         raise
@@ -207,6 +212,11 @@ def signin(payload: SignInRequest):
         # Verify password
         if not bcrypt.checkpw(payload.password.encode('utf-8'), password_hash.encode('utf-8')):
             raise HTTPException(status_code=401, detail="Invalid username or password")
+        
+        # Check approval status
+        approval_status = user.get("approval_status", "approved")  # Default to approved for existing users
+        if approval_status != "approved":
+            raise HTTPException(status_code=403, detail="Your account is pending approval. Please wait for admin approval.")
         
         # Return user without password hash
         return {
@@ -305,6 +315,68 @@ def api_update_user_wage(user_id: str, payload: dict):
         raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error updating user wage: {str(e)}")
+
+@app.get("/api/users/pending-approvals")
+def api_get_pending_approvals():
+    """
+    Get all users with pending approval status.
+    Only accessible by admin (check should be done on frontend, but can add auth here too).
+    """
+    try:
+        resp = requests.get(
+            f"{REST_URL}/users",
+            headers=SERVICE_HEADERS,
+            params={"select": "id,username,role,image_url,created_at", "approval_status": "eq.pending", "order": "created_at.desc"},
+        )
+        resp.raise_for_status()
+        return resp.json() or []
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching pending approvals: {str(e)}")
+
+@app.patch("/api/users/{user_id}/approve")
+def api_approve_user(user_id: str):
+    """
+    Approve a user account.
+    """
+    try:
+        update_data = {"approval_status": "approved"}
+        resp = requests.patch(
+            f"{REST_URL}/users?id=eq.{user_id}",
+            headers=SERVICE_HEADERS,
+            json=update_data
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        return {
+            "message": "User approved successfully",
+            "user": result[0] if isinstance(result, list) and result else result
+        }
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error approving user: {str(e)}")
+
+@app.patch("/api/users/{user_id}/reject")
+def api_reject_user(user_id: str):
+    """
+    Reject a user account (delete it).
+    """
+    try:
+        resp = requests.delete(
+            f"{REST_URL}/users?id=eq.{user_id}",
+            headers=SERVICE_HEADERS
+        )
+        resp.raise_for_status()
+        return {"message": "User rejected and removed successfully"}
+    except requests.exceptions.HTTPError as e:
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error rejecting user: {str(e)}")
 
 @app.get("/orders")
 def orders():
@@ -488,11 +560,12 @@ class OrderCreate(BaseModel):
     paid_amount: float = 0
     total_amount: float = 0
     payment_method: Optional[str] = None
+    opened_by: Optional[str] = None
 
 
 @app.post("/orders")
 def create_order(payload: OrderCreate):
-    data = payload.dict()
+    data = payload.dict(exclude_none=True)  # Exclude None values to avoid DB errors
     if not data.get("id"):
         data["id"] = str(uuid.uuid4())
     try:
@@ -1065,6 +1138,11 @@ def api_create_order(payload: dict):
         "total_amount": payload.get("totalAmount", 0),
         "payment_method": payload.get("paymentMethod", "טרם נקבע"),
     }
+    
+    # Only include opened_by if it has a value (don't send None to avoid DB errors if column doesn't exist)
+    opened_by = payload.get("openedBy") or payload.get("opened_by") or payload.get("userName") or payload.get("user_name")
+    if opened_by:
+        order_data["opened_by"] = opened_by
     
     # Create OrderCreate model from mapped data
     order_create = OrderCreate(**order_data)
@@ -2459,7 +2537,7 @@ def maintenance_tasks(limit: Optional[int] = None, include_image: bool = False):
         else:
             # Exclude image_uri - return all other fields
             params = {
-                "select": "id,unit_id,title,description,status,priority,created_date,assigned_to,category",
+                "select": "id,unit_id,title,description,status,priority,created_date,assigned_to,category,room",
                 "order": "created_date.desc"
             }
         
@@ -2734,6 +2812,10 @@ async def create_maintenance_task(request: Request):
             assigned_value = data.pop("assignedTo")
             if assigned_value:  # Only add if not empty
                 data["assigned_to"] = assigned_value
+        if "room" in data:
+            room_value = data.get("room")
+            if room_value:  # Only add if not empty
+                data["room"] = room_value
 
         # Remove deprecated fields from client payload (UI no longer sends these)
         data.pop("category", None)
@@ -2801,7 +2883,7 @@ def get_maintenance_task(task_id: str, include_image: bool = True):
     """
     try:
         # For single task, include image_uri by default (needed for detail view)
-        select_fields = "*" if include_image else "id,unit_id,title,description,status,priority,created_date,assigned_to,category"
+        select_fields = "*" if include_image else "id,unit_id,title,description,status,priority,created_date,assigned_to,category,room"
         resp = requests.get(
             f"{REST_URL}/maintenance_tasks",
             headers=SERVICE_HEADERS,
@@ -2979,6 +3061,13 @@ async def api_update_maintenance_task(request: Request, task_id: str):
                 assigned_to = assigned_value
         elif "assigned_to" in data:
             assigned_to = data.get("assigned_to")
+        
+        # If closing the task and image_uri is provided, store it as closing_image_uri instead of overwriting image_uri
+        if data.get("status") == "סגור" and ("image_uri" in data or "imageUri" in data):
+            closing_image_uri = data.pop("image_uri", None) or data.pop("imageUri", None)
+            if closing_image_uri:
+                data["closing_image_uri"] = closing_image_uri
+                # Don't overwrite image_uri - keep the original opening media
         
         # Remove None values
         data = {k: v for k, v in data.items() if v is not None}
