@@ -8,6 +8,7 @@ import bcrypt
 import base64
 import json
 import sys
+import urllib.parse
 from datetime import datetime
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -2537,7 +2538,7 @@ def maintenance_tasks(limit: Optional[int] = None, include_image: bool = False):
         else:
             # Exclude image_uri - return all other fields
             params = {
-                "select": "id,unit_id,title,description,status,priority,created_date,assigned_to,category,room",
+                "select": "id,unit_id,title,description,status,priority,created_date,assigned_to,category,room,closing_image_uri",
                 "order": "created_date.desc"
             }
         
@@ -2583,11 +2584,25 @@ def maintenance_tasks_stats():
         resp.raise_for_status()
         tasks = resp.json() or []
         
+        # Normalize status values (match frontend logic)
+        def normalize_status(s: str) -> str:
+            if not s:
+                return "פתוח"
+            s = s.strip()
+            # Normalize old status values to current ones
+            if s in ["open", "פתוח", "בטיפול", "in_progress"]:
+                return "פתוח"
+            if s in ["closed", "סגור"]:
+                return "סגור"
+            # Default to open for unknown statuses (they should be considered open)
+            return "פתוח"
+        
         # Group by unit_id and count statuses (in-memory aggregation is fast for counts)
         stats_by_unit: dict = {}
         for task in tasks:
             unit_id = task.get("unit_id") or task.get("unitId") or task.get("unit") or "unknown"
-            status = task.get("status") or "פתוח"
+            raw_status = task.get("status") or ""
+            status = normalize_status(raw_status)
             
             if unit_id not in stats_by_unit:
                 stats_by_unit[unit_id] = {
@@ -2800,8 +2815,21 @@ async def create_maintenance_task(request: Request):
                     public_url = f"{SUPABASE_URL}/storage/v1/object/public/{bucket}/{unique_filename}"
                     data["image_uri"] = public_url
 
-        if not data.get("id"):
+        # Always generate a UUID for the ID - ignore any client-generated IDs (those starting with "task-")
+        # This ensures all tasks have proper UUIDs that work with Supabase queries
+        client_id = data.get("id", "")
+        if not client_id or client_id.startswith("task-"):
             data["id"] = str(uuid.uuid4())
+        else:
+            # Keep the provided ID only if it's a valid UUID format
+            # UUIDs are 36 characters with dashes: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+            try:
+                # Try to parse as UUID to validate
+                uuid.UUID(client_id)
+                data["id"] = client_id
+            except (ValueError, AttributeError):
+                # Invalid ID format, generate a new UUID
+                data["id"] = str(uuid.uuid4())
 
         # Normalize keys for Supabase schema - map camelCase to snake_case
         if "unitId" in data:
@@ -2884,10 +2912,12 @@ def get_maintenance_task(task_id: str, include_image: bool = True):
     try:
         # For single task, include image_uri by default (needed for detail view)
         select_fields = "*" if include_image else "id,unit_id,title,description,status,priority,created_date,assigned_to,category,room"
+        # URL-encode the task_id to handle special characters in UUIDs
+        encoded_task_id = urllib.parse.quote(task_id, safe='')
         resp = requests.get(
             f"{REST_URL}/maintenance_tasks",
             headers=SERVICE_HEADERS,
-            params={"id": f"eq.{task_id}", "select": select_fields},
+            params={"id": f"eq.{encoded_task_id}", "select": select_fields},
         )
         resp.raise_for_status()
         rows = resp.json() or []
@@ -2928,8 +2958,10 @@ def update_maintenance_task(task_id: str, payload: dict):
             if "assignedTo" in data:
                 data["assigned_to"] = data.pop("assignedTo")
         
+        # URL-encode the task_id to handle special characters in UUIDs
+        encoded_task_id = urllib.parse.quote(task_id, safe='')
         resp = requests.patch(
-            f"{REST_URL}/maintenance_tasks?id=eq.{task_id}",
+            f"{REST_URL}/maintenance_tasks?id=eq.{encoded_task_id}",
             headers=headers,
             json=data
         )
@@ -3076,15 +3108,30 @@ async def api_update_maintenance_task(request: Request, task_id: str):
             return {"message": "No changes provided"}
         
         # Update in Supabase
+        # Validate task_id - reject client-generated IDs that start with "task-"
+        if task_id.startswith("task-"):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid task ID format. Task ID '{task_id}' appears to be a client-generated ID. Please use the database-assigned UUID."
+            )
+        
+        # URL-encode the task_id to handle special characters in UUIDs
+        encoded_task_id = urllib.parse.quote(task_id, safe='')
         headers = {**SERVICE_HEADERS, "Prefer": "return=representation"}
         resp = requests.patch(
-            f"{REST_URL}/maintenance_tasks?id=eq.{task_id}",
+            f"{REST_URL}/maintenance_tasks?id=eq.{encoded_task_id}",
             headers=headers,
             json=data
         )
         resp.raise_for_status()
         if resp.text:
             result = resp.json()
+            # Check if result is empty (task not found)
+            if isinstance(result, list) and len(result) == 0:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Task with ID '{task_id}' not found in database. The task may have been deleted or the ID is incorrect."
+                )
             updated_task = result[0] if isinstance(result, list) and result else result
             
             # Send push notification if task was assigned to a user
@@ -3110,8 +3157,16 @@ async def api_update_maintenance_task(request: Request, task_id: str):
             
             return updated_task
         return {"id": task_id, "message": "Updated successfully"}
+    except HTTPException:
+        raise
     except requests.exceptions.HTTPError as e:
         error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        # Provide more specific error message for 400 Bad Request
+        if e.response and e.response.status_code == 400:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Bad Request: Invalid task ID or data format. Task ID: '{task_id}'. Error: {error_detail}"
+            )
         raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error updating maintenance task: {str(e)}")
@@ -3119,8 +3174,10 @@ async def api_update_maintenance_task(request: Request, task_id: str):
 @app.delete("/maintenance/tasks/{task_id}")
 def delete_maintenance_task(task_id: str):
     try:
+        # URL-encode the task_id to handle special characters in UUIDs
+        encoded_task_id = urllib.parse.quote(task_id, safe='')
         resp = requests.delete(
-            f"{REST_URL}/maintenance_tasks?id=eq.{task_id}",
+            f"{REST_URL}/maintenance_tasks?id=eq.{encoded_task_id}",
             headers=SERVICE_HEADERS
         )
         resp.raise_for_status()
@@ -4041,6 +4098,55 @@ def stop_attendance(payload: dict):
         raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error stopping attendance: {str(e)}")
+
+@app.patch("/api/attendance/logs/{log_id}")
+def update_attendance_log(log_id: str, payload: dict):
+    """
+    Update an attendance log entry.
+    Can update clock_in and/or clock_out times.
+    Times should be in ISO format (e.g., "2026-01-06T19:55:00").
+    """
+    try:
+        # Validate log_id
+        if not log_id:
+            raise HTTPException(status_code=400, detail="Log ID is required")
+        
+        # Extract update data
+        update_data = {}
+        if "clock_in" in payload:
+            update_data["clock_in"] = payload["clock_in"]
+        if "clock_out" in payload:
+            # Allow setting clock_out to null to reopen a session
+            update_data["clock_out"] = payload["clock_out"] if payload["clock_out"] else None
+        
+        if not update_data:
+            raise HTTPException(status_code=400, detail="No update data provided. Must include clock_in and/or clock_out")
+        
+        # URL-encode the log_id to handle special characters
+        encoded_log_id = urllib.parse.quote(log_id, safe='')
+        
+        # Update the attendance log
+        headers = {**SERVICE_HEADERS, "Prefer": "return=representation"}
+        resp = requests.patch(
+            f"{REST_URL}/attendance_logs?id=eq.{encoded_log_id}",
+            headers=headers,
+            json=update_data
+        )
+        resp.raise_for_status()
+        
+        result = resp.json()
+        if isinstance(result, list) and result:
+            return result[0]
+        return result
+    except HTTPException:
+        raise
+    except requests.exceptions.HTTPError as e:
+        if e.response and e.response.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"Attendance log with ID '{log_id}' not found")
+        error_detail = f"HTTP {e.response.status_code}: {e.response.text[:200]}" if e.response else str(e)
+        raise HTTPException(status_code=500, detail=f"Supabase error: {error_detail}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating attendance log: {str(e)}")
 
 # Warehouse endpoints
 @app.get("/api/warehouses")

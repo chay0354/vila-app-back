@@ -2,3 +2,8 @@
 ALTER TABLE maintenance_tasks 
 ADD COLUMN IF NOT EXISTS room TEXT;
 
+
+
+
+
+
