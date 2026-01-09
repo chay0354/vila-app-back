@@ -3195,18 +3195,22 @@ def reports_summary():
         # Calculate expenses from invoices (receipts) - sum all invoices
         total_expenses = 0
         try:
-            # Get all invoices without limit to ensure we sum all receipts
+            # Get all invoices - use select * to get all fields
             invoices_resp = requests.get(
                 f"{REST_URL}/invoices", 
                 headers=SERVICE_HEADERS, 
-                params={"select": "total_price,extracted_data,amount", "limit": "10000"}  # High limit to get all invoices
+                params={"select": "*"}  # Get all fields to ensure we don't miss any amount fields
             )
             invoices_resp.raise_for_status()
             invoices = invoices_resp.json() or []
             
+            print(f"📊 Found {len(invoices)} invoices for expenses calculation")
+            
             # Sum all invoice amounts (receipts)
             for invoice in invoices:
                 amount = 0
+                invoice_id = invoice.get("id", "unknown")
+                
                 # Try to get amount from extracted_data first (simplified schema)
                 extracted_data = invoice.get("extracted_data")
                 if extracted_data:
@@ -3223,18 +3227,26 @@ def reports_summary():
                             totals = extracted_data.get("totals", {})
                             amount = totals.get("grand_total") or totals.get("amount_due") or 0
                 
-                # Fallback to invoice-level fields
+                # Fallback to invoice-level fields (check multiple possible field names)
                 if not amount:
                     amount = invoice.get("total_price") or invoice.get("amount") or 0
                 
                 # Add to total expenses
                 if amount:
                     try:
-                        total_expenses += float(amount) if amount else 0
-                    except (ValueError, TypeError):
-                        pass
+                        amount_float = float(amount) if amount else 0
+                        total_expenses += amount_float
+                        print(f"  ✅ Invoice {invoice_id}: Added {amount_float} to expenses (total: {total_expenses})")
+                    except (ValueError, TypeError) as e:
+                        print(f"  ⚠️ Invoice {invoice_id}: Could not convert amount '{amount}' to float: {e}")
+                else:
+                    print(f"  ⚠️ Invoice {invoice_id}: No amount found (fields: {list(invoice.keys())})")
+            
+            print(f"📊 Total expenses calculated: {total_expenses}")
         except Exception as e:
-            print(f"Warning: Could not fetch invoices for expenses calculation: {e}")
+            print(f"❌ Error fetching invoices for expenses calculation: {e}")
+            import traceback
+            traceback.print_exc()
         
         total_revenue = sum((o.get("total_amount") or 0) for o in orders)
         total_paid = sum((o.get("paid_amount") or 0) for o in orders)
