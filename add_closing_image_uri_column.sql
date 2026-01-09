@@ -9,3 +9,4 @@ ADD COLUMN IF NOT EXISTS closing_image_uri TEXT;
 COMMENT ON COLUMN maintenance_tasks.closing_image_uri IS 'Image or video URI uploaded when the task was closed. The original image_uri is preserved for the opening media.';
 
 
+
