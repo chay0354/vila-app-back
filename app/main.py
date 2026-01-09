@@ -3192,13 +3192,19 @@ def reports_summary():
         orders_resp.raise_for_status()
         orders = orders_resp.json() or []
         
-        # Calculate expenses from invoices instead of expenses table
+        # Calculate expenses from invoices (receipts) - sum all invoices
         total_expenses = 0
         try:
-            invoices_resp = requests.get(f"{REST_URL}/invoices", headers=SERVICE_HEADERS, params={"select": "total_price,extracted_data"})
+            # Get all invoices without limit to ensure we sum all receipts
+            invoices_resp = requests.get(
+                f"{REST_URL}/invoices", 
+                headers=SERVICE_HEADERS, 
+                params={"select": "total_price,extracted_data,amount", "limit": "10000"}  # High limit to get all invoices
+            )
             invoices_resp.raise_for_status()
             invoices = invoices_resp.json() or []
             
+            # Sum all invoice amounts (receipts)
             for invoice in invoices:
                 amount = 0
                 # Try to get amount from extracted_data first (simplified schema)
@@ -3210,12 +3216,18 @@ def reports_summary():
                         except:
                             extracted_data = None
                     if isinstance(extracted_data, dict):
+                        # Check simplified schema first
                         amount = extracted_data.get("total_price") or 0
+                        # If not found, check old detailed schema
+                        if not amount:
+                            totals = extracted_data.get("totals", {})
+                            amount = totals.get("grand_total") or totals.get("amount_due") or 0
                 
-                # Fallback to invoice-level total_price
+                # Fallback to invoice-level fields
                 if not amount:
-                    amount = invoice.get("total_price") or 0
+                    amount = invoice.get("total_price") or invoice.get("amount") or 0
                 
+                # Add to total expenses
                 if amount:
                     try:
                         total_expenses += float(amount) if amount else 0
