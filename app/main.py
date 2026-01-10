@@ -382,9 +382,65 @@ def api_reject_user(user_id: str):
 @app.get("/orders")
 def orders():
     try:
+        # Fetch orders
         resp = requests.get(f"{REST_URL}/orders", headers=SERVICE_HEADERS, params={"select": "*"})
         resp.raise_for_status()
-        return resp.json()
+        orders_list = resp.json() or []
+        
+        # Fetch payment history for all orders
+        order_ids = [o.get("id") for o in orders_list if o.get("id")]
+        payment_history_map = {}
+        
+        if order_ids:
+            try:
+                # Fetch payment history for all orders at once
+                # Supabase PostgREST uses 'in' filter with parentheses
+                order_ids_str = ','.join(order_ids)
+                print(f"🔍 Fetching payment history for {len(order_ids)} orders")
+                payment_resp = requests.get(
+                    f"{REST_URL}/order_payments",
+                    headers=SERVICE_HEADERS,
+                    params={
+                        "select": "id,order_id,amount,payment_method,paid_at,created_at",
+                        "order_id": f"in.({order_ids_str})",
+                        "order": "paid_at.desc"
+                    }
+                )
+                payment_resp.raise_for_status()
+                payment_history = payment_resp.json() or []
+                print(f"✅ Found {len(payment_history)} payment history records")
+                
+                # Group payments by order_id
+                for payment in payment_history:
+                    order_id = payment.get("order_id")
+                    if order_id:
+                        if order_id not in payment_history_map:
+                            payment_history_map[order_id] = []
+                        payment_history_map[order_id].append({
+                            "id": payment.get("id"),
+                            "orderId": order_id,
+                            "amount": float(payment.get("amount", 0)),
+                            "paymentMethod": payment.get("payment_method", ""),
+                            "paidAt": payment.get("paid_at", ""),
+                            "createdAt": payment.get("created_at", ""),
+                        })
+                print(f"📊 Payment history grouped for {len(payment_history_map)} orders")
+            except Exception as e:
+                # If payment history fetch fails, continue without it
+                import traceback
+                print(f"⚠️ Warning: Could not fetch payment history: {str(e)}")
+                print(f"Traceback: {traceback.format_exc()}")
+        
+        # Add payment history to each order (always include field, even if empty)
+        for order in orders_list:
+            order_id = order.get("id")
+            if order_id and order_id in payment_history_map:
+                order["payment_history"] = payment_history_map[order_id]
+            else:
+                # Always include payment_history field, even if empty array
+                order["payment_history"] = []
+        
+        return orders_list
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -400,6 +456,7 @@ class OrderUpdate(BaseModel):
     payment_method: Optional[str] = None
     total_amount: Optional[float] = None
     guest_name: Optional[str] = None
+    guest_phone: Optional[str] = None
     unit_number: Optional[str] = None
     arrival_date: Optional[str] = None
     departure_date: Optional[str] = None
@@ -428,12 +485,12 @@ def update_order(order_id: str, payload: OrderUpdate):
 @app.patch("/api/orders/{order_id}")
 def api_update_order(order_id: str, payload: dict):
     """Update order with frontend camelCase format and sync inspections"""
-    # Get the current order to check if departure_date changed
+    # Get the current order to check if departure_date changed and to track payment changes
     try:
         current_order_resp = requests.get(
             f"{REST_URL}/orders",
             headers=SERVICE_HEADERS,
-            params={"id": f"eq.{order_id}", "select": "id,departure_date,unit_number,guest_name,status"}
+            params={"id": f"eq.{order_id}", "select": "id,departure_date,unit_number,guest_name,status,paid_amount,payment_method"}
         )
         current_order = None
         if current_order_resp.status_code == 200:
@@ -445,6 +502,7 @@ def api_update_order(order_id: str, payload: dict):
         current_order = None
     
     old_departure_date = current_order.get("departure_date") if current_order else None
+    old_paid_amount = float(current_order.get("paid_amount", 0) or 0) if current_order else 0
     
     # Map frontend camelCase or snake_case to backend snake_case
     # Only include fields that are actually provided and not empty
@@ -453,6 +511,10 @@ def api_update_order(order_id: str, payload: dict):
         val = payload.get("guestName") or payload.get("guest_name")
         if val and val.strip():
             update_data["guest_name"] = val.strip()
+    if "guestPhone" in payload or "guest_phone" in payload:
+        val = payload.get("guestPhone") or payload.get("guest_phone")
+        if val is not None:
+            update_data["guest_phone"] = val.strip() if val and val.strip() else None
     if "unitNumber" in payload or "unit_number" in payload:
         val = payload.get("unitNumber") or payload.get("unit_number")
         if val and val.strip():
@@ -491,6 +553,41 @@ def api_update_order(order_id: str, payload: dict):
         val = payload.get("paymentMethod") or payload.get("payment_method")
         if val is not None:
             update_data["payment_method"] = val
+    
+    # Check if payment was made and create payment history record
+    new_paid_amount = None
+    payment_method = None
+    
+    if "paidAmount" in payload or "paid_amount" in payload:
+        val = payload.get("paidAmount") or payload.get("paid_amount")
+        if val is not None:
+            new_paid_amount = float(val)
+    
+    if "paymentMethod" in payload or "payment_method" in payload:
+        val = payload.get("paymentMethod") or payload.get("payment_method")
+        if val and val.strip():
+            payment_method = val.strip()
+    
+    # Create payment history record if payment amount increased
+    if new_paid_amount is not None and new_paid_amount > old_paid_amount and payment_method:
+        payment_amount = new_paid_amount - old_paid_amount
+        try:
+            payment_record = {
+                "order_id": order_id,
+                "amount": payment_amount,
+                "payment_method": payment_method
+            }
+            payment_resp = requests.post(
+                f"{REST_URL}/order_payments",
+                headers=SERVICE_HEADERS,
+                json=payment_record
+            )
+            if payment_resp.status_code in [200, 201]:
+                print(f"✅ Created payment history record: ₪{payment_amount} via {payment_method} for order {order_id}")
+            else:
+                print(f"⚠️ Failed to create payment history record: {payment_resp.status_code} - {payment_resp.text}")
+        except Exception as e:
+            print(f"⚠️ Error creating payment history record: {str(e)}")
     
     # Create OrderUpdate model from mapped data
     order_update = OrderUpdate(**update_data)
@@ -710,53 +807,82 @@ def sync_inspections_with_orders():
         elif inspections_resp.status_code == 404:
             existing_inspections = []
         
-        # Group orders by departure date, filtering out orders with empty unit_number or guest_name
-        orders_by_date = {}
+        # Filter orders: only cancelled orders are excluded (closed orders keep their inspections)
+        valid_orders = []
         for order in orders:
             departure_date = order.get("departure_date")
             unit_number = order.get("unit_number", "").strip() if order.get("unit_number") else ""
             guest_name = order.get("guest_name", "").strip() if order.get("guest_name") else ""
+            order_id = order.get("id")
             
-            if departure_date and order.get("status") != "בוטל" and unit_number and guest_name:
-                if departure_date not in orders_by_date:
-                    orders_by_date[departure_date] = []
-                orders_by_date[departure_date].append(order)
+            # Only exclude cancelled orders - closed orders (שולם, שולם חלקית) keep their inspections
+            if departure_date and order.get("status") != "בוטל" and unit_number and guest_name and order_id:
+                valid_orders.append(order)
         
-        # Get existing inspection dates and their IDs
-        existing_dates = {insp.get("departure_date") for insp in existing_inspections if insp.get("departure_date")}
-        existing_inspections_by_date = {insp.get("departure_date"): insp.get("id") for insp in existing_inspections if insp.get("departure_date")}
+        # Get existing inspections by order_id
+        existing_inspections_by_order = {insp.get("order_id"): insp for insp in existing_inspections if insp.get("order_id")}
+        existing_order_ids = set(existing_inspections_by_order.keys())
         
-        # Create inspections for missing departure dates
-        for departure_date, orders_for_date in orders_by_date.items():
-            if departure_date not in existing_dates:
-                # Create inspection for this departure date
-                first_order = orders_for_date[0]
-                guest_names = [o.get("guest_name", "").strip() for o in orders_for_date if o.get("guest_name", "").strip()]
+        # Create inspections for orders that don't have one yet
+        for order in valid_orders:
+            order_id = order.get("id")
+            if order_id and order_id not in existing_order_ids:
+                # Create inspection for this order
                 create_inspection_for_departure_date(
-                    departure_date,
-                    first_order.get("id"),
-                    first_order.get("unit_number", "").strip(),
-                    ", ".join(guest_names)
+                    order.get("departure_date"),
+                    order_id,
+                    order.get("unit_number", "").strip(),
+                    order.get("guest_name", "").strip()
                 )
         
-        # Remove inspections for departure dates that no longer have orders
-        orders_dates = set(orders_by_date.keys())
-        for inspection in existing_inspections:
-            inspection_date = inspection.get("departure_date")
-            if inspection_date and inspection_date not in orders_dates:
-                # This departure date no longer has any orders, delete the inspection
-                inspection_id = inspection.get("id")
-                try:
-                    delete_resp = requests.delete(
-                        f"{REST_URL}/inspections?id=eq.{inspection_id}",
-                        headers=SERVICE_HEADERS
-                    )
-                    if delete_resp.status_code in [200, 204]:
-                        print(f"Deleted orphaned inspection {inspection_id} for departure date {inspection_date}")
-                except Exception as e:
-                    print(f"Warning: Error deleting orphaned inspection {inspection_id}: {str(e)}")
+        # Remove inspections only if the order is cancelled
+        # Get all order IDs and their statuses for efficient lookup
+        all_order_ids = {order.get("id"): order.get("status") for order in orders if order.get("id")}
+        valid_order_ids = {order.get("id") for order in valid_orders if order.get("id")}
         
-        print(f"Synced inspections with orders: {len(orders_by_date)} unique departure dates, removed {len(existing_dates) - len(orders_dates)} orphaned inspections")
+        for inspection in existing_inspections:
+            inspection_order_id = inspection.get("order_id")
+            inspection_id = inspection.get("id")
+            
+            # Delete inspection only if the order is cancelled (בוטל)
+            if inspection_order_id:
+                order_status = all_order_ids.get(inspection_order_id)
+                if order_status == "בוטל":
+                    # Order is cancelled, delete inspection
+                    try:
+                        delete_resp = requests.delete(
+                            f"{REST_URL}/inspections?id=eq.{inspection_id}",
+                            headers=SERVICE_HEADERS
+                        )
+                        if delete_resp.status_code in [200, 204]:
+                            print(f"Deleted inspection {inspection_id} for cancelled order {inspection_order_id}")
+                    except Exception as e:
+                        print(f"Warning: Error deleting inspection {inspection_id}: {str(e)}")
+                elif inspection_order_id not in all_order_ids:
+                    # Order doesn't exist in the orders list, check if it's really gone
+                    try:
+                        order_check = requests.get(
+                            f"{REST_URL}/orders",
+                            headers=SERVICE_HEADERS,
+                            params={"id": f"eq.{inspection_order_id}", "select": "id,status"}
+                        )
+                        if order_check.status_code == 200:
+                            order_data = order_check.json() or []
+                            if not order_data:
+                                # Order doesn't exist, delete inspection
+                                try:
+                                    delete_resp = requests.delete(
+                                        f"{REST_URL}/inspections?id=eq.{inspection_id}",
+                                        headers=SERVICE_HEADERS
+                                    )
+                                    if delete_resp.status_code in [200, 204]:
+                                        print(f"Deleted orphaned inspection {inspection_id} for non-existent order {inspection_order_id}")
+                                except Exception as e:
+                                    print(f"Warning: Error deleting orphaned inspection {inspection_id}: {str(e)}")
+                    except Exception as e:
+                        print(f"Warning: Error checking order {inspection_order_id} for inspection {inspection_id}: {str(e)}")
+        
+        print(f"Synced inspections with orders: {len(valid_orders)} valid orders, {len(existing_inspections)} existing inspections")
         
     except Exception as e:
         print(f"Warning: Error syncing inspections with orders: {str(e)}")
@@ -791,21 +917,22 @@ def update_inspection_for_departure_date(old_date: str, new_date: str, order_id:
         return None
 
 def create_inspection_for_departure_date(departure_date: str, order_id: str, unit_number: str, guest_name: str):
-    """Create an inspection for a departure date if one doesn't already exist"""
-    if not departure_date:
+    """Create an inspection for an order (one inspection per order, even if same departure date)"""
+    if not departure_date or not order_id:
         return None
     
     # Don't create inspection if unit_number or guest_name are empty
     if not unit_number or not unit_number.strip() or not guest_name or not guest_name.strip():
-        print(f"Skipping inspection creation for {departure_date}: unit_number or guest_name is empty")
+        print(f"Skipping inspection creation for order {order_id}: unit_number or guest_name is empty")
         return None
     
     try:
-        # Check if inspection already exists for this departure date
+        # Check if inspection already exists for this order_id
+        inspection_id = f"INSP-{order_id}"
         check_resp = requests.get(
             f"{REST_URL}/inspections",
             headers=SERVICE_HEADERS,
-            params={"departure_date": f"eq.{departure_date}", "select": "id,departure_date,unit_number"}
+            params={"id": f"eq.{inspection_id}", "select": "id,departure_date,unit_number,guest_name,order_id"}
         )
         
         existing_inspections = []
@@ -815,41 +942,36 @@ def create_inspection_for_departure_date(departure_date: str, order_id: str, uni
             # Table doesn't exist yet, that's OK
             existing_inspections = []
         
-        # If inspection already exists for this departure date, update it if needed
+        # If inspection already exists for this order, update it if needed
         if existing_inspections and len(existing_inspections) > 0:
             existing = existing_inspections[0]
-            # Update unit_number and guest_name if they changed
-            if existing.get("unit_number") != unit_number or existing.get("guest_name") != guest_name:
-                update_data = {}
-                if existing.get("unit_number") != unit_number:
-                    update_data["unit_number"] = unit_number
-                if existing.get("guest_name") != guest_name:
-                    # Combine guest names if multiple orders share the date
-                    existing_guests = existing.get("guest_name", "")
-                    if guest_name not in existing_guests:
-                        update_data["guest_name"] = f"{existing_guests}, {guest_name}".strip(", ")
-                    else:
-                        update_data["guest_name"] = existing_guests
-                
-                if update_data:
-                    try:
-                        update_resp = requests.patch(
-                            f"{REST_URL}/inspections?id=eq.{existing['id']}",
-                            headers=SERVICE_HEADERS,
-                            json=update_data
-                        )
-                        if update_resp.status_code in [200, 201, 204]:
-                            print(f"Updated inspection {existing['id']} with new unit/guest info")
-                    except Exception as e:
-                        print(f"Warning: Error updating inspection: {str(e)}")
+            # Update unit_number, guest_name, and departure_date if they changed
+            update_data = {}
+            if existing.get("unit_number") != unit_number:
+                update_data["unit_number"] = unit_number
+            if existing.get("guest_name") != guest_name:
+                update_data["guest_name"] = guest_name
+            if existing.get("departure_date") != departure_date:
+                update_data["departure_date"] = departure_date
+            
+            if update_data:
+                try:
+                    update_resp = requests.patch(
+                        f"{REST_URL}/inspections?id=eq.{existing['id']}",
+                        headers=SERVICE_HEADERS,
+                        json=update_data
+                    )
+                    if update_resp.status_code in [200, 201, 204]:
+                        print(f"Updated inspection {existing['id']} for order {order_id}")
+                except Exception as e:
+                    print(f"Warning: Error updating inspection: {str(e)}")
             
             return existing
         
-        # Create new inspection for this departure date
-        inspection_id = f"INSP-{departure_date}"
+        # Create new inspection for this order (separate inspection per order)
         inspection_data = {
             "id": inspection_id,
-            "order_id": order_id,  # Keep first order ID for reference
+            "order_id": order_id,
             "unit_number": unit_number,
             "guest_name": guest_name,
             "departure_date": departure_date,
@@ -889,30 +1011,31 @@ def create_inspection_for_departure_date(departure_date: str, order_id: str, uni
             except Exception as e:
                 print(f"Warning: Error creating task {task['id']}: {str(e)}")
         
-        print(f"Created inspection {inspection_id} for departure date {departure_date}")
+        print(f"Created inspection {inspection_id} for order {order_id} (departure date {departure_date})")
         return inspection_data
         
     except Exception as e:
         # Don't fail order creation if inspection creation fails
-        print(f"Warning: Failed to create inspection for departure date {departure_date}: {str(e)}")
+        print(f"Warning: Failed to create inspection for order {order_id}: {str(e)}")
         return None
 
 def create_cleaning_inspection_for_departure_date(departure_date: str, order_id: str, unit_number: str, guest_name: str):
-    """Create a cleaning inspection for a departure date if one doesn't already exist"""
-    if not departure_date:
+    """Create a cleaning inspection for an order (one inspection per order, even if same departure date)"""
+    if not departure_date or not order_id:
         return None
     
     # Don't create inspection if unit_number or guest_name are empty
     if not unit_number or not unit_number.strip() or not guest_name or not guest_name.strip():
-        print(f"Skipping cleaning inspection creation for {departure_date}: unit_number or guest_name is empty")
+        print(f"Skipping cleaning inspection creation for order {order_id}: unit_number or guest_name is empty")
         return None
     
     try:
-        # Check if cleaning inspection already exists for this departure date
+        # Check if cleaning inspection already exists for this order_id
+        inspection_id = f"CLEAN-{order_id}"
         check_resp = requests.get(
             f"{REST_URL}/cleaning_inspections",
             headers=SERVICE_HEADERS,
-            params={"departure_date": f"eq.{departure_date}", "select": "id,departure_date,unit_number"}
+            params={"id": f"eq.{inspection_id}", "select": "id,departure_date,unit_number,guest_name,order_id"}
         )
         
         existing_inspections = []
@@ -922,41 +1045,36 @@ def create_cleaning_inspection_for_departure_date(departure_date: str, order_id:
             # Table doesn't exist yet, that's OK
             existing_inspections = []
         
-        # If inspection already exists for this departure date, update it if needed
+        # If inspection already exists for this order, update it if needed
         if existing_inspections and len(existing_inspections) > 0:
             existing = existing_inspections[0]
-            # Update unit_number and guest_name if they changed
-            if existing.get("unit_number") != unit_number or existing.get("guest_name") != guest_name:
-                update_data = {}
-                if existing.get("unit_number") != unit_number:
-                    update_data["unit_number"] = unit_number
-                if existing.get("guest_name") != guest_name:
-                    # Combine guest names if multiple orders share the date
-                    existing_guests = existing.get("guest_name", "")
-                    if guest_name not in existing_guests:
-                        update_data["guest_name"] = f"{existing_guests}, {guest_name}".strip(", ")
-                    else:
-                        update_data["guest_name"] = existing_guests
-                
-                if update_data:
-                    try:
-                        update_resp = requests.patch(
-                            f"{REST_URL}/cleaning_inspections?id=eq.{existing['id']}",
-                            headers=SERVICE_HEADERS,
-                            json=update_data
-                        )
-                        if update_resp.status_code in [200, 201, 204]:
-                            print(f"Updated cleaning inspection {existing['id']} with new unit/guest info")
-                    except Exception as e:
-                        print(f"Warning: Error updating cleaning inspection: {str(e)}")
+            # Update unit_number, guest_name, and departure_date if they changed
+            update_data = {}
+            if existing.get("unit_number") != unit_number:
+                update_data["unit_number"] = unit_number
+            if existing.get("guest_name") != guest_name:
+                update_data["guest_name"] = guest_name
+            if existing.get("departure_date") != departure_date:
+                update_data["departure_date"] = departure_date
+            
+            if update_data:
+                try:
+                    update_resp = requests.patch(
+                        f"{REST_URL}/cleaning_inspections?id=eq.{existing['id']}",
+                        headers=SERVICE_HEADERS,
+                        json=update_data
+                    )
+                    if update_resp.status_code in [200, 201, 204]:
+                        print(f"Updated cleaning inspection {existing['id']} for order {order_id}")
+                except Exception as e:
+                    print(f"Warning: Error updating cleaning inspection: {str(e)}")
             
             return existing
         
-        # Create new cleaning inspection for this departure date
-        inspection_id = f"CLEAN-{departure_date}"
+        # Create new cleaning inspection for this order (separate inspection per order)
         inspection_data = {
             "id": inspection_id,
-            "order_id": order_id,  # Keep first order ID for reference
+            "order_id": order_id,
             "unit_number": unit_number,
             "guest_name": guest_name,
             "departure_date": departure_date,
@@ -996,12 +1114,12 @@ def create_cleaning_inspection_for_departure_date(departure_date: str, order_id:
             except Exception as e:
                 print(f"Warning: Exception creating cleaning task {task['id']}: {str(e)}")
         
-        print(f"Created cleaning inspection {inspection_id} for departure date {departure_date}")
+        print(f"Created cleaning inspection {inspection_id} for order {order_id} (departure date {departure_date})")
         return inspection_data
         
     except Exception as e:
         # Don't fail order creation if cleaning inspection creation fails
-        print(f"Warning: Failed to create cleaning inspection for departure date {departure_date}: {str(e)}")
+        print(f"Warning: Failed to create cleaning inspection for order {order_id}: {str(e)}")
         return None
 
 def update_cleaning_inspection_for_departure_date(old_departure_date: str, new_departure_date: str, order_id: str, unit_number: str, guest_name: str):
@@ -1045,31 +1163,30 @@ def sync_cleaning_inspections_with_orders():
         
         orders = orders_resp.json() or []
         
-        # Group orders by departure date
-        orders_by_date = {}
+        # Filter orders: only cancelled orders are excluded (closed orders keep their inspections)
+        valid_orders = []
         for order in orders:
             departure_date = order.get("departure_date")
             status = order.get("status", "")
             
-            # Skip cancelled orders
+            # Only exclude cancelled orders - closed orders (שולם, שולם חלקית) keep their inspections
             if not departure_date or status == "בוטל":
                 continue
             
             # Skip orders with empty unit_number or guest_name
             unit_number = order.get("unit_number", "").strip()
             guest_name = order.get("guest_name", "").strip()
-            if not unit_number or not guest_name:
+            order_id = order.get("id")
+            if not unit_number or not guest_name or not order_id:
                 continue
             
-            if departure_date not in orders_by_date:
-                orders_by_date[departure_date] = []
-            orders_by_date[departure_date].append(order)
+            valid_orders.append(order)
         
         # Get all existing cleaning inspections
         cleaning_inspections_resp = requests.get(
             f"{REST_URL}/cleaning_inspections",
             headers=SERVICE_HEADERS,
-            params={"select": "id,departure_date"}
+            params={"select": "id,departure_date,order_id"}
         )
         
         existing_cleaning_inspections = []
@@ -1078,47 +1195,70 @@ def sync_cleaning_inspections_with_orders():
         elif cleaning_inspections_resp.status_code == 404:
             existing_cleaning_inspections = []
         
-        # Get existing cleaning inspection dates
-        existing_cleaning_dates = {insp.get("departure_date") for insp in existing_cleaning_inspections if insp.get("departure_date")}
+        # Get existing cleaning inspections by order_id
+        existing_cleaning_inspections_by_order = {insp.get("order_id"): insp for insp in existing_cleaning_inspections if insp.get("order_id")}
+        existing_cleaning_order_ids = set(existing_cleaning_inspections_by_order.keys())
         
-        # Create or update cleaning inspections for each departure date
-        for departure_date, date_orders in orders_by_date.items():
-            if not date_orders:
-                continue
-            
-            # Only create if it doesn't exist
-            if departure_date not in existing_cleaning_dates:
-                # Use first order's details
-                first_order = date_orders[0]
-                order_id = first_order.get("id")
-                unit_number = first_order.get("unit_number", "").strip()
-                guest_name = first_order.get("guest_name", "").strip()
-                
-                # Combine guest names if multiple orders
-                if len(date_orders) > 1:
-                    guest_names = [o.get("guest_name", "").strip() for o in date_orders if o.get("guest_name", "").strip()]
-                    guest_name = ", ".join(set(guest_names))  # Remove duplicates
-                
-                create_cleaning_inspection_for_departure_date(departure_date, order_id, unit_number, guest_name)
+        # Create cleaning inspections for orders that don't have one yet
+        for order in valid_orders:
+            order_id = order.get("id")
+            if order_id and order_id not in existing_cleaning_order_ids:
+                # Create cleaning inspection for this order
+                create_cleaning_inspection_for_departure_date(
+                    order.get("departure_date"),
+                    order_id,
+                    order.get("unit_number", "").strip(),
+                    order.get("guest_name", "").strip()
+                )
         
-        # Remove cleaning inspections for departure dates that no longer have orders
-        orders_dates = set(orders_by_date.keys())
+        # Remove cleaning inspections only if the order is cancelled
+        # Get all order IDs and their statuses for efficient lookup
+        all_order_ids = {order.get("id"): order.get("status") for order in orders if order.get("id")}
+        valid_order_ids = {order.get("id") for order in valid_orders if order.get("id")}
+        
         for inspection in existing_cleaning_inspections:
-            inspection_date = inspection.get("departure_date")
-            if inspection_date and inspection_date not in orders_dates:
-                # This departure date no longer has any orders, delete the cleaning inspection
-                inspection_id = inspection.get("id")
-                try:
-                    delete_resp = requests.delete(
-                        f"{REST_URL}/cleaning_inspections?id=eq.{inspection_id}",
-                        headers=SERVICE_HEADERS
-                    )
-                    if delete_resp.status_code in [200, 204]:
-                        print(f"Deleted orphaned cleaning inspection {inspection_id} for departure date {inspection_date}")
-                except Exception as e:
-                    print(f"Warning: Error deleting orphaned cleaning inspection {inspection_id}: {str(e)}")
+            inspection_order_id = inspection.get("order_id")
+            inspection_id = inspection.get("id")
+            
+            # Delete cleaning inspection only if the order is cancelled (בוטל)
+            if inspection_order_id:
+                order_status = all_order_ids.get(inspection_order_id)
+                if order_status == "בוטל":
+                    # Order is cancelled, delete cleaning inspection
+                    try:
+                        delete_resp = requests.delete(
+                            f"{REST_URL}/cleaning_inspections?id=eq.{inspection_id}",
+                            headers=SERVICE_HEADERS
+                        )
+                        if delete_resp.status_code in [200, 204]:
+                            print(f"Deleted cleaning inspection {inspection_id} for cancelled order {inspection_order_id}")
+                    except Exception as e:
+                        print(f"Warning: Error deleting cleaning inspection {inspection_id}: {str(e)}")
+                elif inspection_order_id not in all_order_ids:
+                    # Order doesn't exist in the orders list, check if it's really gone
+                    try:
+                        order_check = requests.get(
+                            f"{REST_URL}/orders",
+                            headers=SERVICE_HEADERS,
+                            params={"id": f"eq.{inspection_order_id}", "select": "id,status"}
+                        )
+                        if order_check.status_code == 200:
+                            order_data = order_check.json() or []
+                            if not order_data:
+                                # Order doesn't exist, delete cleaning inspection
+                                try:
+                                    delete_resp = requests.delete(
+                                        f"{REST_URL}/cleaning_inspections?id=eq.{inspection_id}",
+                                        headers=SERVICE_HEADERS
+                                    )
+                                    if delete_resp.status_code in [200, 204]:
+                                        print(f"Deleted orphaned cleaning inspection {inspection_id} for non-existent order {inspection_order_id}")
+                                except Exception as e:
+                                    print(f"Warning: Error deleting orphaned cleaning inspection {inspection_id}: {str(e)}")
+                    except Exception as e:
+                        print(f"Warning: Error checking order {inspection_order_id} for cleaning inspection {inspection_id}: {str(e)}")
         
-        print(f"Synced cleaning inspections with {len(orders)} orders: {len(orders_by_date)} unique departure dates, removed {len(existing_cleaning_dates) - len(orders_dates)} orphaned cleaning inspections")
+        print(f"Synced cleaning inspections with {len(orders)} orders: {len(valid_orders)} valid orders, {len(existing_cleaning_inspections)} existing cleaning inspections")
     except Exception as e:
         print(f"Error syncing cleaning inspections with orders: {str(e)}")
 
@@ -1128,6 +1268,7 @@ def api_create_order(payload: dict):
     # Map frontend camelCase to backend snake_case
     order_data = {
         "guest_name": payload.get("guestName", ""),
+        "guest_phone": payload.get("guestPhone") or None,
         "unit_number": payload.get("unitNumber", ""),
         "arrival_date": payload.get("arrivalDate", ""),
         "departure_date": payload.get("departureDate", ""),
@@ -2478,6 +2619,10 @@ def update_inventory_order(order_id: str, payload: dict):
     order_data = {}
     if "status" in payload:
         order_data["status"] = payload["status"]
+    if "orderStatus" in payload or "order_status" in payload:
+        val = payload.get("orderStatus") or payload.get("order_status")
+        if val:
+            order_data["order_status"] = val
     if "deliveryDate" in payload or "delivery_date" in payload:
         order_data["delivery_date"] = payload.get("deliveryDate") or payload.get("delivery_date")
     if "orderType" in payload or "order_type" in payload:
@@ -2488,7 +2633,7 @@ def update_inventory_order(order_id: str, payload: dict):
         order_data["unit_number"] = payload.get("unitNumber") or payload.get("unit_number")
     
     # Also accept snake_case directly
-    for key in ["status", "delivery_date", "order_type", "ordered_by", "unit_number"]:
+    for key in ["status", "order_status", "delivery_date", "order_type", "ordered_by", "unit_number"]:
         if key in payload and key not in order_data:
             order_data[key] = payload[key]
     
@@ -4920,14 +5065,29 @@ def register_push_token(payload: PushTokenRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error registering push token: {str(e)}")
 
+# Rate limiter for push notifications (max 1 per 4 seconds per user)
+last_notification_times = {}  # {username: timestamp}
+NOTIFICATION_RATE_LIMIT_SECONDS = 4
+
 @app.post("/push/send")
 def send_push_notification(payload: SendNotificationRequest):
     """
     Send push notification to user(s).
     If username is provided, send to that user only.
     If username is None, send to all users.
+    Rate limited to 1 notification per 4 seconds per user.
     """
     try:
+        # Rate limiting: check if we've sent a notification to this user recently
+        if payload.username:
+            now = datetime.now().timestamp()
+            last_time = last_notification_times.get(payload.username, 0)
+            time_since_last = now - last_time
+            if time_since_last < NOTIFICATION_RATE_LIMIT_SECONDS:
+                wait_time = NOTIFICATION_RATE_LIMIT_SECONDS - time_since_last
+                print(f"⏸️ Rate limit: skipping notification for {payload.username} (last one was {time_since_last:.2f}s ago, need to wait {wait_time:.2f}s more)")
+                return {"message": f"Rate limited: please wait {wait_time:.2f}s", "sent": 0, "rate_limited": True}
+        
         # Get push tokens
         params = {"select": "username,token,platform"}
         if payload.username:
@@ -4956,104 +5116,112 @@ def send_push_notification(payload: SendNotificationRequest):
             token = token_data.get("token", "")
             
             # Send FCM notification for Android
-            if platform == "android" and FCM_AVAILABLE and token:
-                try:
-                    # Use Firebase Admin SDK to send FCM message
-                    message = fcm_messaging.Message(
-                        token=token,
-                        notification=fcm_messaging.Notification(
-                            title=payload.title,
-                            body=payload.body,
-                        ),
-                        data=payload.data or {},
-                        android=fcm_messaging.AndroidConfig(
-                            priority="high",
-                            notification=fcm_messaging.AndroidNotification(
-                                channel_id="default",
-                                sound="default",
+            if platform == "android" and token:
+                print(f"   📱 Processing Android token for user: {token_data.get('username', 'unknown')}")
+                print(f"   📱 FCM_AVAILABLE: {FCM_AVAILABLE}, Token length: {len(token)}")
+                
+                is_invalid_token = False
+                fcm_sent = False
+                
+                # Try Firebase Admin SDK first if available
+                if FCM_AVAILABLE:
+                    try:
+                        # Use Firebase Admin SDK to send FCM message
+                        message = fcm_messaging.Message(
+                            token=token,
+                            notification=fcm_messaging.Notification(
+                                title=payload.title,
+                                body=payload.body,
                             ),
-                        ),
-                    )
-                    response = fcm_messaging.send(message)
-                    print(f"✅ FCM message sent: {response}")
-                    sent_count += 1
-                except Exception as e:
-                    error_str = str(e).lower()
-                    error_msg = str(e)
-                    print(f"❌ FCM error: {error_msg}")
-                    
-                    # Check if token is invalid/unregistered
-                    # Firebase Admin SDK throws exceptions for invalid tokens
-                    is_invalid_token = (
-                        "invalid" in error_str or
-                        "not a valid" in error_str or
-                        "unregistered" in error_str or
-                        "registration" in error_str and "token" in error_str
-                    )
-                    
-                    if is_invalid_token:
-                        print(f"🗑️  Deleting invalid FCM token for user {token_data.get('username', 'unknown')}")
-                        try:
-                            # Delete invalid token from database
-                            # Find token by username, platform, and token value
-                            token_username = token_data.get("username", "")
-                            if token_username:
-                                # Query to find token ID
-                                find_resp = requests.get(
-                                    f"{REST_URL}/push_tokens",
-                                    headers=SERVICE_HEADERS,
-                                    params={
-                                        "username": f"eq.{token_username}",
-                                        "platform": f"eq.android",
-                                        "token": f"eq.{token}",
-                                        "select": "id"
-                                    }
-                                )
-                                find_resp.raise_for_status()
-                                token_records = find_resp.json() or []
-                                
-                                if token_records:
-                                    token_id = token_records[0].get("id")
-                                    # Delete the invalid token
-                                    delete_resp = requests.delete(
+                            data=payload.data or {},
+                            android=fcm_messaging.AndroidConfig(
+                                priority="high",
+                                notification=fcm_messaging.AndroidNotification(
+                                    channel_id="default",
+                                    sound="default",
+                                ),
+                            ),
+                        )
+                        response = fcm_messaging.send(message)
+                        print(f"✅ FCM message sent via Admin SDK: {response}")
+                        sent_count += 1
+                        fcm_sent = True
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        error_msg = str(e)
+                        print(f"❌ FCM Admin SDK error: {error_msg}")
+                        
+                        # Check if token is invalid/unregistered
+                        is_invalid_token = (
+                            "invalid" in error_str or
+                            "not a valid" in error_str or
+                            "unregistered" in error_str or
+                            "registration" in error_str and "token" in error_str
+                        )
+                        
+                        if is_invalid_token:
+                            print(f"🗑️  Deleting invalid FCM token for user {token_data.get('username', 'unknown')}")
+                            try:
+                                token_username = token_data.get("username", "")
+                                if token_username:
+                                    find_resp = requests.get(
                                         f"{REST_URL}/push_tokens",
                                         headers=SERVICE_HEADERS,
-                                        params={"id": f"eq.{token_id}"}
+                                        params={
+                                            "username": f"eq.{token_username}",
+                                            "platform": f"eq.android",
+                                            "token": f"eq.{token}",
+                                            "select": "id"
+                                        }
                                     )
-                                    delete_resp.raise_for_status()
-                                    print(f"✅ Deleted invalid token from database")
-                                else:
-                                    print(f"⚠️  Token not found in database to delete")
-                        except Exception as delete_error:
-                            print(f"⚠️  Failed to delete invalid token: {str(delete_error)}")
-                    
-                    # Try legacy FCM API with server key as fallback
-                    if fcm_server_key and not is_invalid_token:
-                        try:
-                            fcm_url = "https://fcm.googleapis.com/fcm/send"
-                            fcm_headers = {
-                                "Authorization": f"key={fcm_server_key}",
-                                "Content-Type": "application/json",
-                            }
-                            fcm_payload = {
-                                "to": token,
-                                "notification": {
-                                    "title": payload.title,
-                                    "body": payload.body,
-                                },
-                                "data": payload.data or {},
-                                "priority": "high",
-                            }
-                            fcm_resp = requests.post(fcm_url, headers=fcm_headers, json=fcm_payload, timeout=10)
-                            if fcm_resp.status_code == 200:
-                                sent_count += 1
-                            elif fcm_resp.status_code in [400, 404]:
-                                # Invalid token - delete it
-                                print(f"🗑️  Legacy FCM API reports invalid token, deleting...")
-                                # Same deletion logic as above
-                        except Exception as legacy_error:
-                            print(f"Legacy FCM error: {str(legacy_error)}")
-                    continue
+                                    find_resp.raise_for_status()
+                                    token_records = find_resp.json() or []
+                                    
+                                    if token_records:
+                                        token_id = token_records[0].get("id")
+                                        delete_resp = requests.delete(
+                                            f"{REST_URL}/push_tokens",
+                                            headers=SERVICE_HEADERS,
+                                            params={"id": f"eq.{token_id}"}
+                                        )
+                                        delete_resp.raise_for_status()
+                                        print(f"✅ Deleted invalid token from database")
+                            except Exception as delete_error:
+                                print(f"⚠️  Failed to delete invalid token: {str(delete_error)}")
+                
+                # Try legacy FCM API as fallback (if Admin SDK failed or not available)
+                if not fcm_sent and not is_invalid_token and fcm_server_key:
+                    try:
+                        print(f"   📱 Trying legacy FCM API with server key...")
+                        fcm_url = "https://fcm.googleapis.com/fcm/send"
+                        fcm_headers = {
+                            "Authorization": f"key={fcm_server_key}",
+                            "Content-Type": "application/json",
+                        }
+                        fcm_payload = {
+                            "to": token,
+                            "notification": {
+                                "title": payload.title,
+                                "body": payload.body,
+                            },
+                            "data": payload.data or {},
+                            "priority": "high",
+                        }
+                        fcm_resp = requests.post(fcm_url, headers=fcm_headers, json=fcm_payload, timeout=10)
+                        print(f"   📱 Legacy FCM response: {fcm_resp.status_code}, {fcm_resp.text[:200]}")
+                        if fcm_resp.status_code == 200:
+                            print(f"✅ FCM message sent via legacy API")
+                            sent_count += 1
+                            fcm_sent = True
+                        elif fcm_resp.status_code in [400, 404]:
+                            print(f"🗑️  Legacy FCM API reports invalid token")
+                    except Exception as legacy_error:
+                        print(f"❌ Legacy FCM error: {str(legacy_error)}")
+                
+                if not fcm_sent:
+                    print(f"⚠️  Could not send FCM notification - FCM_AVAILABLE={FCM_AVAILABLE}, FCM_SERVER_KEY={'set' if fcm_server_key else 'not set'}")
+                
+                continue
             
             # Send Web Push notification for PWA
             if platform == "web":
@@ -5170,6 +5338,10 @@ def send_push_notification(payload: SendNotificationRequest):
         except:
             # If table doesn't exist, continue without storing
             pass
+        
+        # Update rate limiter timestamp if notification was sent
+        if payload.username and sent_count > 0:
+            last_notification_times[payload.username] = datetime.now().timestamp()
         
         return {
             "message": f"Notification sent to {sent_count} device(s) via push services, {len(tokens)} total device(s) registered",
