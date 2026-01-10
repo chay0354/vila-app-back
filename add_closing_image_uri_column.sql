@@ -10,3 +10,5 @@ COMMENT ON COLUMN maintenance_tasks.closing_image_uri IS 'Image or video URI upl
 
 
 
+
+
